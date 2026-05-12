@@ -40,3 +40,34 @@ export function urlDescargaDocumento(id) {
 export function urlDescargaZip(idPortafolio) {
   return `${BASE}/licitaciones/${encodeURIComponent(idPortafolio)}/zip`;
 }
+
+// ===== Base de datos local =====
+export function fetchDbStats() {
+  return jsonFetch(`/db/stats`);
+}
+
+export function fetchDbLicitaciones(params) {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v !== undefined && v !== null && v !== "") qs.set(k, v);
+  }
+  return jsonFetch(`/db/licitaciones?${qs.toString()}`);
+}
+
+export function deleteDbLicitacion(id) {
+  return jsonFetch(`/db/licitaciones/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export function clearDb() {
+  return jsonFetch(`/db`, { method: "DELETE" });
+}
+
+export function syncPdfs(ids) {
+  return jsonFetch(`/db/sync-pdfs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+}

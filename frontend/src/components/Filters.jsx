@@ -92,8 +92,31 @@ export default function Filters({
                 </span>
                 <span className="block text-xs text-slate-600 dark:text-slate-400 mt-0.5">
                   Licitación pública, selección abreviada, concurso de méritos y
-                  mínima cuantía. Son los que tienen Formato 1, 2, 3, anexos y
-                  pliego de condiciones.
+                  mínima cuantía. Son los que tienen pliego de condiciones,
+                  formatos y anexos.
+                </span>
+              </span>
+            </label>
+          </div>
+
+          <div className="rounded-xl bg-amber-50 dark:bg-amber-500/10 ring-1 ring-amber-200 dark:ring-amber-500/20 p-3">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5 rounded text-amber-600 focus:ring-amber-500"
+                checked={!!filters.soloConDocumentos}
+                onChange={(e) =>
+                  set("soloConDocumentos", e.target.checked ? "1" : "")
+                }
+              />
+              <span className="text-sm">
+                <span className="font-medium text-slate-800 dark:text-slate-100">
+                  Solo con documentos descargables
+                </span>
+                <span className="block text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                  Cruza con el dataset de archivos de SECOP II. La API pública
+                  tiene un retraso de ~2 meses; los procesos abiertos muy
+                  recientes pueden no tener formatos aún.
                 </span>
               </span>
             </label>

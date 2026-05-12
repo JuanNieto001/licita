@@ -204,8 +204,8 @@ export async function listLicitaciones({
   }
 
   // Modo "solo con documentos": sobre-muestreamos y cruzamos con el dataset de docs
-  const FETCH_FACTOR = 6;
-  const HARD_CAP = 600;
+  const FETCH_FACTOR = 25;
+  const HARD_CAP = 2000;
   const candidatesNeeded = Math.min(HARD_CAP, page * pageSize * FETCH_FACTOR);
   const candidates = await socrataGet(PROCESOS, {
     $limit: candidatesNeeded,

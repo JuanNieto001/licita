@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { fetchLicitaciones, fetchFacets } from "./api.js";
+import {
+  fetchLicitaciones,
+  fetchFacets,
+  fetchLicitacion,
+  fetchDbStats,
+} from "./api.js";
 import LicitacionCard from "./components/LicitacionCard.jsx";
 import Filters from "./components/Filters.jsx";
 import DetailModal from "./components/DetailModal.jsx";
+import MiBase from "./components/MiBase.jsx";
 import { I } from "./components/Icons.jsx";
 
 const PAGE_SIZE = 12;
@@ -33,6 +39,8 @@ export default function App() {
   const [facets, setFacets] = useState({ estados: [], departamentos: [] });
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [selected, setSelected] = useState(null);
+  const [view, setView] = useState("catalogo"); // "catalogo" | "mibase"
+  const [dbCount, setDbCount] = useState(0);
   const [theme, setTheme] = useState(() =>
     typeof document !== "undefined" &&
     document.documentElement.classList.contains("dark")
@@ -45,6 +53,54 @@ export default function App() {
   useEffect(() => {
     fetchFacets().then(setFacets).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    const tick = () =>
+      fetchDbStats()
+        .then((s) => setDbCount(s.total || 0))
+        .catch(() => {});
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  async function openByIdFromDb(id) {
+    try {
+      const full = await fetchLicitacion(id);
+      setSelected(full);
+    } catch {
+      // fallback: fetch from local db
+      const local = await (
+        await fetch(`/api/db/licitaciones/${encodeURIComponent(id)}`)
+      ).json();
+      // Map to the shape DetailModal expects
+      setSelected({
+        id_del_portafolio: local.id,
+        id_del_proceso: local.id_proceso,
+        referencia_del_proceso: local.referencia,
+        entidad: local.entidad,
+        nit_entidad: local.nit_entidad,
+        departamento_entidad: local.departamento,
+        ciudad_entidad: local.ciudad,
+        nombre_del_procedimiento: local.objeto,
+        descripci_n_del_procedimiento: local.descripcion,
+        precio_base: local.presupuesto,
+        estado_del_procedimiento: local.estado,
+        fase: local.fase,
+        modalidad_de_contratacion: local.modalidad,
+        tipo_de_contrato: local.tipo_contrato,
+        fecha_de_publicacion_del: local.fecha_publicacion,
+        fecha_de_ultima_publicaci: local.fecha_ultima_publicacion,
+        duracion: local.duracion,
+        unidad_de_duracion: local.unidad_duracion,
+        urlproceso: local.url_proceso ? { url: local.url_proceso } : null,
+        adjudicado: local.adjudicado ? "Si" : "No",
+        nombre_del_proveedor: local.proveedor_adjudicado,
+        nit_del_proveedor_adjudicado: local.nit_proveedor,
+        valor_total_adjudicacion: local.valor_adjudicado,
+      });
+    }
+  }
 
   const queryFilters = useMemo(
     () => ({ ...filters, search: debouncedSearch || undefined }),
@@ -118,17 +174,48 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex-1 max-w-xl ml-auto sm:ml-0">
-            <div className="relative">
-              <I.Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                className="input pl-9"
-                placeholder="Buscar por objeto, entidad o referencia…"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
+          <nav className="flex gap-1 bg-slate-100 dark:bg-slate-800 rounded-xl p-1 mr-auto ml-2">
+            <button
+              onClick={() => setView("catalogo")}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                view === "catalogo"
+                  ? "bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-50 shadow-sm"
+                  : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100"
+              }`}
+            >
+              <span className="hidden sm:inline">Catálogo SECOP</span>
+              <span className="sm:hidden">Catálogo</span>
+            </button>
+            <button
+              onClick={() => setView("mibase")}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5 ${
+                view === "mibase"
+                  ? "bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-50 shadow-sm"
+                  : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100"
+              }`}
+            >
+              Mi base
+              {dbCount > 0 && (
+                <span className="badge bg-brand-100 text-brand-800 dark:bg-brand-500/20 dark:text-brand-300 py-0">
+                  {dbCount}
+                </span>
+              )}
+            </button>
+          </nav>
+
+          {view === "catalogo" && (
+            <div className="flex-1 max-w-xl">
+              <div className="relative">
+                <I.Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  className="input pl-9"
+                  placeholder="Buscar por objeto, entidad o referencia…"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+              </div>
             </div>
-          </div>
+          )}
 
           <button
             className="btn-ghost p-2"
@@ -152,6 +239,11 @@ export default function App() {
         </div>
       </header>
 
+      {view === "mibase" ? (
+        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 min-w-0">
+          <MiBase onOpenDetalle={openByIdFromDb} />
+        </main>
+      ) : (
       <div className="flex-1 max-w-7xl w-full mx-auto px-0 lg:px-6 lg:flex lg:gap-6 lg:py-6">
         <Filters
           filters={filters}
@@ -210,11 +302,24 @@ export default function App() {
           )}
 
           {data && data.items.length === 0 && (
-            <div className="text-center py-16">
+            <div className="text-center py-16 max-w-lg mx-auto">
               <I.Search className="w-10 h-10 mx-auto mb-3 text-slate-300 dark:text-slate-700" />
-              <div className="text-slate-600 dark:text-slate-400">
+              <div className="text-slate-600 dark:text-slate-400 mb-3">
                 No se encontraron licitaciones con esos criterios.
               </div>
+              {filters.soloAbiertos && filters.soloConDocumentos && (
+                <div className="rounded-xl bg-amber-50 dark:bg-amber-500/10 ring-1 ring-amber-200 dark:ring-amber-500/20 p-4 text-sm text-amber-800 dark:text-amber-200 text-left">
+                  <strong>Tip:</strong> el dataset abierto de SECOP II tiene un
+                  retraso de ~2 meses, por lo que los procesos
+                  <em> recién publicados (abiertos)</em> normalmente todavía no
+                  tienen sus formatos en la API. Probá desactivar
+                  <strong> "Solo abiertos para postularse"</strong> para ver
+                  procesos con formatos descargables, o desactivá
+                  <strong> "Solo con documentos descargables"</strong> para ver
+                  los procesos abiertos actuales (y abrirlos directamente en
+                  SECOP II).
+                </div>
+              )}
             </div>
           )}
 
@@ -244,6 +349,7 @@ export default function App() {
           )}
         </main>
       </div>
+      )}
 
       <footer className="border-t border-slate-200 dark:border-slate-800 py-4 text-center text-xs text-slate-500 dark:text-slate-500">
         Datos: API SECOP II · Colombia Compra Eficiente · datos.gov.co
