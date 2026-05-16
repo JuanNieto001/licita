@@ -99,11 +99,11 @@ export default function Filters({
             </label>
           </div>
 
-          <div className="rounded-xl bg-amber-50 dark:bg-amber-500/10 ring-1 ring-amber-200 dark:ring-amber-500/20 p-3">
+          <div className="rounded-xl bg-violet-50 dark:bg-violet-500/10 ring-1 ring-violet-200 dark:ring-violet-500/20 p-3">
             <label className="flex items-start gap-2 cursor-pointer">
               <input
                 type="checkbox"
-                className="mt-0.5 rounded text-amber-600 focus:ring-amber-500"
+                className="mt-0.5 rounded text-violet-600 focus:ring-violet-500"
                 checked={!!filters.soloConDocumentos}
                 onChange={(e) =>
                   set("soloConDocumentos", e.target.checked ? "1" : "")
@@ -111,10 +111,11 @@ export default function Filters({
               />
               <span className="text-sm">
                 <span className="font-medium text-slate-800 dark:text-slate-100">
-                  Solo con documentos descargables
+                  Solo con documentos
                 </span>
                 <span className="block text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                  Cruza con el dataset de archivos de SECOP II. La API pública
+                  Muestra únicamente licitaciones que tienen documentos
+                  descargables (PDF, Word, Excel, ZIP, etc.). La API pública
                   tiene un retraso de ~2 meses; los procesos abiertos muy
                   recientes pueden no tener formatos aún.
                 </span>

@@ -114,7 +114,18 @@ export default function App() {
     fetchLicitaciones(queryFilters)
       .then((d) => {
         if (myReq !== reqIdRef.current) return;
-        setData(d);
+        // De-duplicar: SECOP puede devolver el mismo id_del_portafolio varias veces,
+        // lo que causa keys duplicadas en React y corrompe la actualización del DOM.
+        const seen = new Set();
+        const uniqueItems = [];
+        for (const item of d.items) {
+          const key = item.id_del_portafolio || item.id_del_proceso;
+          if (!seen.has(key)) {
+            seen.add(key);
+            uniqueItems.push(item);
+          }
+        }
+        setData({ ...d, items: uniqueItems });
       })
       .catch((e) => {
         if (myReq !== reqIdRef.current) return;

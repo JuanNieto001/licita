@@ -203,7 +203,8 @@ export async function listLicitaciones({
     };
   }
 
-  // Modo "solo con documentos": sobre-muestreamos y cruzamos con el dataset de docs
+  // Modo "solo con documentos": sobre-muestreamos, cruzamos con el dataset de docs
+  // y verificamos individualmente para eliminar falsos positivos.
   const FETCH_FACTOR = 25;
   const HARD_CAP = 2000;
   const candidatesNeeded = Math.min(HARD_CAP, page * pageSize * FETCH_FACTOR);
@@ -218,20 +219,42 @@ export async function listLicitaciones({
     return { items: [], total: 0, page, pageSize, totalPages: 0, filtroConDocumentos: true };
   }
 
-  const ids = candidates.map((c) => c.id_del_portafolio).filter(Boolean);
+  // 1. De-duplicar candidatos (SECOP puede devolver el mismo ID varias veces)
+  const seenIds = new Set();
+  const uniqueCandidates = [];
+  for (const c of candidates) {
+    if (c.id_del_portafolio && !seenIds.has(c.id_del_portafolio)) {
+      seenIds.add(c.id_del_portafolio);
+      uniqueCandidates.push(c);
+    }
+  }
+
+  // 2. Cruce batch rápido con datasets de documentos (pre-filtro)
+  const uniqueIds = uniqueCandidates.map((c) => c.id_del_portafolio);
   const CHUNK = 80;
   const conDocs = new Set();
-  for (let i = 0; i < ids.length; i += CHUNK) {
-    const chunk = ids.slice(i, i + CHUNK);
+  for (let i = 0; i < uniqueIds.length; i += CHUNK) {
+    const chunk = uniqueIds.slice(i, i + CHUNK);
     const found = await getProcesosConDocs(chunk);
     for (const p of found) conDocs.add(p);
   }
 
-  const filtered = candidates.filter((c) => conDocs.has(c.id_del_portafolio));
-  const total = filtered.length;
+  const batchFiltered = uniqueCandidates.filter((c) => conDocs.has(c.id_del_portafolio));
+
+  // 3. Verificación individual: confirmar que cada candidato realmente tiene documentos.
+  //    Esto elimina falsos positivos causados por caché o inconsistencias en la API SECOP.
+  const verified = [];
+  for (const candidate of batchFiltered) {
+    const docs = await getDocumentosPorProceso(candidate.id_del_portafolio);
+    if (docs.length > 0) {
+      verified.push(candidate);
+    }
+  }
+
+  const total = verified.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const startIdx = (page - 1) * pageSize;
-  const items = filtered.slice(startIdx, startIdx + pageSize);
+  const items = verified.slice(startIdx, startIdx + pageSize);
 
   return {
     items,
