@@ -155,13 +155,17 @@ El caché del cross-ref tiene TTL de 10 minutos (cache.set(cacheKey, set, 600)).
 
 - De-duplicación: SECOP devuelve el mismo id_del_portafolio múltiples veces (encontré 10 IDs duplicados en 300 candidatos). Ahora se eliminan duplicados antes del cruce.
 
-- Verificación individual: Después del cruce batch rápido (que actúa como pre-filtro), cada licitación candidata se verifica individualmente usando getDocumentosPorProceso. Solo las que realmente tienen documentos pasan al resultado final. Esto elimina los falsos positivos causados por inconsistencias o caché de la API de SECOP.
+- Cruce batch: Después de de-duplicar, los IDs candidatos se cruzan en lotes de 80 contra los datasets de documentos (`getProcesosConDocs`). Los que aparecen al menos una vez se consideran "con documentos" y pasan al resultado final.
 
-- Rendimiento: Como el batch pre-filtra a un conjunto pequeño (~9 items de 287 únicos), la verificación individual no agrega retraso significativo. Las consultas a SECOP además se cachean automáticamente
+- Rendimiento: El cruce batch es una sola consulta agrupada por lote, no una llamada HTTP por proceso. Las consultas a SECOP además se cachean automáticamente.
+
+- Muestreo fijo (HARD_CAP=2000): el conteo de candidatos no depende del `pageSize` solicitado. Como SECOP indexa los documentos con ~2 meses de retraso, los procesos más recientes (que dominan el orden por fecha desc) raramente tienen docs en el dataset; muestrear pocos candidatos hacía que casi todos se descartaran. Muestrear siempre hasta HARD_CAP asegura llegar también a procesos algo más antiguos que sí tengan docs publicados.
+
+> Nota: hasta el commit anterior (a) se hacía una verificación individual por proceso con `getDocumentosPorProceso` que fallaba silenciosamente bajo rate-limit y (b) el universo de candidatos era `page * pageSize * 25` (apenas 300 para una vista típica). El síntoma combinado era que agregar el filtro de departamento podía *aumentar* los resultados en vez de reducirlos: con pocos candidatos por departamento, todos eran procesos viejos con docs ya indexados.
 
 3. Los cambios que resolvieron el problema:
 
-- Backend (socrata.js): De-duplicación de candidatos + verificación individual de documentos para eliminar falsos positivos
+- Backend (socrata.js): De-duplicación de candidatos + cruce batch contra los datasets de documentos
 - Frontend (App.jsx): De-duplicación de items por id_del_portafolio antes de guardar en el state de React, evitando keys duplicadas que corrompían el DOM
 
 ##

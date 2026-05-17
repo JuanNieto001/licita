@@ -203,11 +203,13 @@ export async function listLicitaciones({
     };
   }
 
-  // Modo "solo con documentos": sobre-muestreamos, cruzamos con el dataset de docs
-  // y verificamos individualmente para eliminar falsos positivos.
-  const FETCH_FACTOR = 25;
+  // Modo "solo con documentos": el orden por fecha desc deja arriba los procesos
+  // más recientes, cuyos documentos suelen aún no estar indexados en los datasets
+  // de SECOP (retraso ~2 meses). Por eso muestreamos un universo grande FIJO
+  // (no proporcional a pageSize) para alcanzar también procesos más antiguos
+  // que sí tengan documentos publicados.
   const HARD_CAP = 2000;
-  const candidatesNeeded = Math.min(HARD_CAP, page * pageSize * FETCH_FACTOR);
+  const candidatesNeeded = HARD_CAP;
   const candidates = await socrataGet(PROCESOS, {
     $limit: candidatesNeeded,
     $offset: 0,
@@ -241,20 +243,10 @@ export async function listLicitaciones({
 
   const batchFiltered = uniqueCandidates.filter((c) => conDocs.has(c.id_del_portafolio));
 
-  // 3. Verificación individual: confirmar que cada candidato realmente tiene documentos.
-  //    Esto elimina falsos positivos causados por caché o inconsistencias en la API SECOP.
-  const verified = [];
-  for (const candidate of batchFiltered) {
-    const docs = await getDocumentosPorProceso(candidate.id_del_portafolio);
-    if (docs.length > 0) {
-      verified.push(candidate);
-    }
-  }
-
-  const total = verified.length;
+  const total = batchFiltered.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const startIdx = (page - 1) * pageSize;
-  const items = verified.slice(startIdx, startIdx + pageSize);
+  const items = batchFiltered.slice(startIdx, startIdx + pageSize);
 
   return {
     items,

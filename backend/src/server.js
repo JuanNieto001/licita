@@ -132,8 +132,11 @@ app.get(
   "/api/licitaciones/:idPortafolio/analisis-pliego",
   asyncHandler(async (req, res) => {
     const id = req.params.idPortafolio;
-    const cached = db.getAnalisisPliego(id);
-    if (cached) return res.json({ ...cached, desde_cache: true });
+    const refresh = req.query.refresh === "1" || req.query.refresh === "true";
+    if (!refresh) {
+      const cached = db.getAnalisisPliego(id);
+      if (cached) return res.json({ ...cached, desde_cache: true });
+    }
 
     const analisis = await analizarPliego(id);
     db.setAnalisisPliego(id, analisis);

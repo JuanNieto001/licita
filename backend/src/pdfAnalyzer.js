@@ -174,6 +174,20 @@ const NOMBRES_EXCLUIDOS = new Set([
   "maximo",
 ]);
 
+// Líneas que claramente no son criterios (paginación, identificadores, datos de
+// contacto del organismo contratante, encabezados de tabla, etc.). Si la línea
+// contiene cualquiera de estas marcas, se descarta antes de aplicar regex.
+const REGEX_LINEAS_NO_CRITERIO = [
+  /\bp[áa]gina\s+\d+\s+de\s+\d+/i,
+  /\bversi[óo]n\s+\d+/i,
+  /\bc[óo]digo\s+[A-Z]/i,
+  /\bNIT\b/i,
+  /\bcra?\.?\s+\d+/i,
+  /\bcalle\s+\d+/i,
+  /\btel[ée]fono|\btel[.:]\s*\(?\d/i,
+  /^no\.?\s+\d+\s*$/i,
+];
+
 function limpiarNombreCriterio(nombre) {
   return nombre
     .replace(/\.{2,}/g, "")
@@ -234,7 +248,8 @@ export function extraerCriterios(md) {
   }
   const bloque = lineas.slice(inicio, fin);
 
-  const REGEX_TOTAL = /^total\s+\d+(?:[.,]\d+)?\s*$/i;
+  // Total/Total Puntos/Total Puntaje XX — cierre del bloque de criterios.
+  const REGEX_TOTAL = /^total(?:\s+(?:puntos?|puntaje|m[áa]ximo))?\s*[:.]?\s*\d+(?:[.,]\d+)?\s*$/i;
 
   const patrones = [
     {
@@ -242,7 +257,9 @@ export function extraerCriterios(md) {
       withUnit: true,
     },
     {
-      re: /^(.+?)[:\-–]\s*(\d{1,4}(?:[.,]\d{1,3})?)\s*(puntos|pts|%)?\s*$/i,
+      // Separador `:` admite cualquier contexto; los guiones requieren espacio
+      // antes para no capturar NITs ("899.999.475-4") ni códigos ("CCE-EICP-GI-02").
+      re: /^(.+?)(?::\s*|\s+[\-–]\s*)(\d{1,4}(?:[.,]\d{1,3})?)\s*(puntos|pts|%)?\s*$/i,
       withUnit: false,
     },
     {
@@ -269,7 +286,7 @@ export function extraerCriterios(md) {
     if (REGEX_TOC.test(linea)) continue;
     if (/^[-_=*•]+$/.test(linea)) continue;
     if (/^--\s*\d+\s+of\s+\d+\s*--$/i.test(linea)) continue;
-    if (/^p[áa]gina\s*\d+\s*de\s*\d+/i.test(linea)) continue;
+    if (REGEX_LINEAS_NO_CRITERIO.some((re) => re.test(linea))) continue;
 
     let capturado = false;
     for (const { re, withUnit } of patrones) {

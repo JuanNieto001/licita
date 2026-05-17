@@ -14,7 +14,7 @@ export default function Filters({
     <aside
       className={`fixed lg:static inset-y-0 right-0 w-80 lg:w-72 shrink-0 bg-white dark:bg-slate-900
         border-l lg:border-l-0 lg:border-r border-slate-200 dark:border-slate-800
-        transform transition-transform z-30
+        transform lg:transform-none transition-transform lg:transition-none z-30 lg:z-auto
         ${open ? "translate-x-0" : "translate-x-full lg:translate-x-0"}`}
     >
       <div className="h-full overflow-y-auto scrollbar-thin">
