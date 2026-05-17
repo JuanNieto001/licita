@@ -29,6 +29,10 @@ export function fetchDocumentos(id) {
   return jsonFetch(`/licitaciones/${encodeURIComponent(id)}/documentos`);
 }
 
+export function fetchAnalisisPliego(id) {
+  return jsonFetch(`/licitaciones/${encodeURIComponent(id)}/analisis-pliego`);
+}
+
 export function fetchFacets() {
   return jsonFetch(`/facets`);
 }

@@ -195,4 +195,28 @@ export function getAllIds() {
   return Object.keys(data);
 }
 
+const ANALISIS_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+
+export function getAnalisisPliego(id) {
+  const item = data[id];
+  if (!item?.analisis_pliego) return null;
+  const ts = item.analisis_pliego.analizado_en;
+  if (!ts) return item.analisis_pliego;
+  const age = Date.now() - new Date(ts).getTime();
+  if (age > ANALISIS_TTL_MS) return null;
+  return item.analisis_pliego;
+}
+
+export function setAnalisisPliego(id, analisis) {
+  if (!id) return null;
+  const prev = data[id] || { id };
+  data[id] = {
+    ...prev,
+    analisis_pliego: analisis,
+    actualizado_en: new Date().toISOString(),
+  };
+  scheduleWrite();
+  return data[id];
+}
+
 load();

@@ -10,6 +10,7 @@ import {
   getFacets,
 } from "./socrata.js";
 import * as db from "./db.js";
+import { analizarPliego, setDownloader } from "./pdfAnalyzer.js";
 
 const downloadDispatcher = new Agent().compose(
   interceptors.redirect({ maxRedirections: 5 }),
@@ -27,6 +28,8 @@ async function downloadFromSecop(url) {
     dispatcher: downloadDispatcher,
   });
 }
+
+setDownloader(downloadFromSecop);
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -122,6 +125,19 @@ app.get(
     const docs = await getDocumentosPorProceso(req.params.idPortafolio);
     db.setPdfs(req.params.idPortafolio, docs);
     res.json(docs);
+  }),
+);
+
+app.get(
+  "/api/licitaciones/:idPortafolio/analisis-pliego",
+  asyncHandler(async (req, res) => {
+    const id = req.params.idPortafolio;
+    const cached = db.getAnalisisPliego(id);
+    if (cached) return res.json({ ...cached, desde_cache: true });
+
+    const analisis = await analizarPliego(id);
+    db.setAnalisisPliego(id, analisis);
+    res.json(analisis);
   }),
 );
 

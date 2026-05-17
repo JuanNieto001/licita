@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import jsPDF from "jspdf";
 import { I } from "./Icons.jsx";
 import {
   fetchDocumentos,
+  fetchAnalisisPliego,
   urlDescargaDocumento,
   urlDescargaZip,
 } from "../api.js";
@@ -18,6 +20,9 @@ export default function DetailModal({ licitacion, onClose }) {
   const [docsErr, setDocsErr] = useState(null);
   const [downloading, setDownloading] = useState({});
   const [zipping, setZipping] = useState(false);
+  const [analisis, setAnalisis] = useState(null);
+  const [analisisErr, setAnalisisErr] = useState(null);
+  const [analizando, setAnalizando] = useState(false);
 
   const id = licitacion.id_del_portafolio;
 
@@ -25,6 +30,9 @@ export default function DetailModal({ licitacion, onClose }) {
     let alive = true;
     setDocs(null);
     setDocsErr(null);
+    setAnalisis(null);
+    setAnalisisErr(null);
+    setAnalizando(false);
     fetchDocumentos(id)
       .then((d) => alive && setDocs(d))
       .catch((e) => alive && setDocsErr(e.message));
@@ -84,6 +92,75 @@ export default function DetailModal({ licitacion, onClose }) {
     } finally {
       setZipping(false);
     }
+  }
+
+  async function analizarPliegoFn() {
+    setAnalizando(true);
+    setAnalisisErr(null);
+    try {
+      const data = await fetchAnalisisPliego(id);
+      setAnalisis(data);
+    } catch (e) {
+      setAnalisisErr(e.message);
+    } finally {
+      setAnalizando(false);
+    }
+  }
+
+  function descargarResumenPdf() {
+    if (!analisis) return;
+    const doc = new jsPDF();
+    doc.setFontSize(14);
+    doc.text("Análisis de pliego de condiciones", 14, 18);
+    doc.setFontSize(10);
+    const titulo = licitacion.nombre_del_procedimiento || "";
+    const tituloLineas = doc.splitTextToSize(titulo, 180);
+    doc.text(tituloLineas, 14, 26);
+    let y = 26 + tituloLineas.length * 5 + 4;
+    doc.text(`Entidad: ${licitacion.entidad || "—"}`, 14, y);
+    y += 6;
+    doc.text(`ID: ${id}`, 14, y);
+    y += 10;
+    doc.setFontSize(12);
+    doc.text("Criterios de evaluación", 14, y);
+    y += 8;
+    doc.setFontSize(10);
+
+    if (!analisis.criterios || analisis.criterios.length === 0) {
+      const aviso =
+        analisis.advertencias?.join(" · ") ||
+        "No se identificaron criterios.";
+      const w = doc.splitTextToSize(aviso, 180);
+      doc.text(w, 14, y);
+      y += w.length * 6;
+    } else {
+      analisis.criterios.forEach((c, i) => {
+        const linea = `${i + 1}. ${c.nombre} — ${c.puntaje} ${c.unidad}`;
+        const wrapped = doc.splitTextToSize(linea, 180);
+        doc.text(wrapped, 14, y);
+        y += wrapped.length * 6;
+        if (y > 270) {
+          doc.addPage();
+          y = 20;
+        }
+      });
+      if (analisis.puntaje_total) {
+        doc.setFontSize(11);
+        doc.text(`Total: ${analisis.puntaje_total}`, 14, y + 4);
+      }
+    }
+
+    if (analisis.documento_analizado?.nombre) {
+      const pageH = doc.internal.pageSize.getHeight();
+      doc.setFontSize(8);
+      doc.text(
+        `Fuente: ${analisis.documento_analizado.nombre}`,
+        14,
+        pageH - 10,
+      );
+    }
+
+    doc.save(`${id}_analisis_pliego.pdf`);
   }
 
   const color = estadoColor(licitacion.estado_del_procedimiento);
@@ -288,6 +365,121 @@ export default function DetailModal({ licitacion, onClose }) {
               </ul>
             )}
           </div>
+
+          {docs && docs.length > 0 && (
+            <div className="px-5 pb-5">
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                <h3 className="text-sm font-semibold flex items-center gap-2 text-slate-800 dark:text-slate-100">
+                  <I.Doc className="w-4 h-4" /> Análisis del pliego
+                </h3>
+                <div className="flex gap-2">
+                  {!analisis && (
+                    <button
+                      className="btn-primary"
+                      onClick={analizarPliegoFn}
+                      disabled={analizando}
+                    >
+                      {analizando ? (
+                        <>
+                          <I.Spinner className="w-4 h-4 animate-spin" />
+                          Analizando…
+                        </>
+                      ) : (
+                        <>Analizar pliego de condiciones</>
+                      )}
+                    </button>
+                  )}
+                  {analisis && analisis.criterios?.length > 0 && (
+                    <button
+                      className="btn-secondary"
+                      onClick={descargarResumenPdf}
+                    >
+                      <I.Download className="w-4 h-4" />
+                      <span className="hidden sm:inline">
+                        Descargar resumen PDF
+                      </span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {analizando && (
+                <div className="space-y-2">
+                  <div className="skeleton h-12" />
+                  <div className="skeleton h-12" />
+                  <div className="skeleton h-12" />
+                </div>
+              )}
+
+              {analisisErr && (
+                <div className="rounded-xl bg-rose-50 dark:bg-rose-500/10 ring-1 ring-rose-200 dark:ring-rose-500/20 p-3 text-sm text-rose-700 dark:text-rose-300">
+                  {analisisErr}
+                </div>
+              )}
+
+              {analisis && (
+                <>
+                  {analisis.advertencias?.length > 0 && (
+                    <div className="mb-3 text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-500/10 ring-1 ring-amber-200 dark:ring-amber-500/20 p-2 rounded-lg">
+                      {analisis.advertencias.join(" · ")}
+                    </div>
+                  )}
+                  {analisis.criterios?.length > 0 ? (
+                    <div className="overflow-hidden rounded-xl ring-1 ring-slate-200 dark:ring-slate-800">
+                      <table className="w-full text-sm">
+                        <thead className="bg-slate-50 dark:bg-slate-800/50 text-slate-600 dark:text-slate-300">
+                          <tr>
+                            <th className="text-left p-3 font-medium">
+                              Criterio
+                            </th>
+                            <th className="text-right p-3 font-medium w-28">
+                              Puntaje
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                          {analisis.criterios.map((c, i) => (
+                            <tr
+                              key={i}
+                              className="hover:bg-slate-50 dark:hover:bg-slate-800/50"
+                            >
+                              <td className="p-3 text-slate-800 dark:text-slate-100">
+                                {c.nombre}
+                              </td>
+                              <td className="p-3 text-right font-semibold tabular-nums">
+                                {c.puntaje} {c.unidad}
+                              </td>
+                            </tr>
+                          ))}
+                          {analisis.puntaje_total > 0 && (
+                            <tr className="bg-slate-50 dark:bg-slate-800/50">
+                              <td className="p-3 font-semibold text-slate-800 dark:text-slate-100">
+                                Total
+                              </td>
+                              <td className="p-3 text-right font-semibold tabular-nums">
+                                {analisis.puntaje_total}
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="text-sm text-slate-500 dark:text-slate-400 p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 text-center">
+                      No se identificaron criterios estructurados en el pliego.
+                    </div>
+                  )}
+                  {analisis.documento_analizado && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
+                      Fuente: {analisis.documento_analizado.nombre} · Método:{" "}
+                      {analisis.metodo_extraccion}
+                      {analisis.desde_cache && " · (cache)"}
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         {licitacion.urlproceso?.url && (
