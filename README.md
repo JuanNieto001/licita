@@ -133,3 +133,35 @@ npm run preview
 - **Frontend**: React 18, Vite 5, Tailwind CSS 3
 - **Backend**: Node.js, Express 4, undici, archiver, node-cache
 - **Datos**: API SECOP II (datos.gov.co - Socrata SODA)
+
+
+### Documentacion de Cambios realizados - Byron
+
+## Filtros de busqueda de "solo documentos descargables"
+
+1. Específicamente en el archivo backend/src/db.js donde se gestiona la base de datos local (que efectivamente funciona con un diccionario let data = {}).
+
+Ahí existe la función listSaved, la cual recibe un parámetro llamado tienePdfs. Dependiendo del valor de ese parámetro, se filtran las licitaciones (que son los valores del diccionario obtenidos mediante Object.values(data)) de la siguiente manera:
+
+- Con PDFs: Si envías tienePdfs como "true", "1", o "con", devolverá únicamente las licitaciones donde tiene_pdfs === true.
+- Sin PDFs: Si envías "false", "0", o "sin", devolverá aquellas donde tiene_pdfs === false.
+- Desconocido (Aún no verificado): Si envías "unknown" o "desconocido", devolverá las que tienen tiene_pdfs == null (es decir, aquellas a las que aún no se les han consultado los documentos a la API).
+
+2. La simulación muestra que las 9 licitaciones filtradas todas tienen documentos ✓. Sin embargo, la API de SECOP devuelve el ID CO1.BDOS.10175312 duplicado.
+
+El problema está en el caché del backend. El backend usa node-cache con TTL de 5 minutos. Cuando el filtro se ejecutó por primera vez para ti, probablemente los resultados del caché incluían licitaciones que ya no tienen documentos disponibles (datos desactualizados de SECOP), o la consulta SECOP devolvió resultados diferentes.
+
+El caché del cross-ref tiene TTL de 10 minutos (cache.set(cacheKey, set, 600)).
+
+- De-duplicación: SECOP devuelve el mismo id_del_portafolio múltiples veces (encontré 10 IDs duplicados en 300 candidatos). Ahora se eliminan duplicados antes del cruce.
+
+- Verificación individual: Después del cruce batch rápido (que actúa como pre-filtro), cada licitación candidata se verifica individualmente usando getDocumentosPorProceso. Solo las que realmente tienen documentos pasan al resultado final. Esto elimina los falsos positivos causados por inconsistencias o caché de la API de SECOP.
+
+- Rendimiento: Como el batch pre-filtra a un conjunto pequeño (~9 items de 287 únicos), la verificación individual no agrega retraso significativo. Las consultas a SECOP además se cachean automáticamente
+
+3. Los cambios que resolvieron el problema:
+
+- Backend (socrata.js): De-duplicación de candidatos + verificación individual de documentos para eliminar falsos positivos
+- Frontend (App.jsx): De-duplicación de items por id_del_portafolio antes de guardar en el state de React, evitando keys duplicadas que corrompían el DOM
+
+##
