@@ -44,6 +44,88 @@ function buildDocUrl(documentId) {
   return `${SECOP_DOC_BASE}?DocumentId=${encodeURIComponent(documentId)}&InCommunity=False&InPaymentGateway=False&DocUniqueIdentifier=`;
 }
 
+// SECOP devuelve Content-Type "application/unknown" para casi todo. Mapeamos el
+// tipo real por extensión para que el navegador/Windows reconozcan el archivo.
+const MIME_POR_EXT = {
+  pdf: "application/pdf",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  zip: "application/zip",
+  rar: "application/vnd.rar",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  txt: "text/plain; charset=utf-8",
+  csv: "text/csv; charset=utf-8",
+};
+
+function extDe(nombre, fallbackExt) {
+  const m = /\.([a-z0-9]{2,5})$/i.exec((nombre || "").trim());
+  return (m ? m[1] : fallbackExt || "").toLowerCase();
+}
+
+function nombreConExtension(nombre, ext) {
+  const limpio = (nombre || "").trim();
+  if (!limpio) return `documento.${ext || "bin"}`;
+  if (ext && !new RegExp(`\\.${ext}$`, "i").test(limpio)) return `${limpio}.${ext}`;
+  return limpio;
+}
+
+function tipoContenido(ext, ctUpstream) {
+  if (MIME_POR_EXT[ext]) return MIME_POR_EXT[ext];
+  if (ctUpstream && ctUpstream !== "application/unknown") return ctUpstream;
+  return "application/octet-stream";
+}
+
+// Descarga el documento COMPLETO a un buffer, con reintentos. Garantiza
+// integridad: devuelve el archivo entero o un fallo claro, nunca un archivo
+// truncado (causa de DOCX "corruptos que no abren": un ZIP truncado es ilegible).
+async function descargarDocABuffer(url, maxIntentos = 3) {
+  let ultimo;
+  for (let intento = 1; intento <= maxIntentos; intento++) {
+    try {
+      const up = await downloadFromSecop(url);
+      if (up.statusCode < 200 || up.statusCode >= 300) {
+        const detalle = (await up.body.text().catch(() => "")).slice(0, 300);
+        if ((up.statusCode >= 500 || up.statusCode === 429) && intento < maxIntentos) {
+          await new Promise((r) => setTimeout(r, 500 * intento));
+          continue;
+        }
+        return { ok: false, statusCode: up.statusCode, detalle };
+      }
+      const chunks = [];
+      for await (const c of up.body) chunks.push(c);
+      const buffer = Buffer.concat(chunks);
+      const declarado = Number(up.headers["content-length"]);
+      if (Number.isFinite(declarado) && declarado > 0 && buffer.length < declarado) {
+        // Respuesta truncada: reintentar antes de entregar algo incompleto.
+        if (intento < maxIntentos) {
+          await new Promise((r) => setTimeout(r, 500 * intento));
+          continue;
+        }
+        return {
+          ok: false,
+          statusCode: 502,
+          detalle: `Descarga incompleta (${buffer.length}/${declarado} bytes)`,
+        };
+      }
+      return { ok: true, statusCode: up.statusCode, buffer, headers: up.headers };
+    } catch (e) {
+      ultimo = e;
+      if (intento < maxIntentos) {
+        await new Promise((r) => setTimeout(r, 500 * intento));
+        continue;
+      }
+    }
+  }
+  return { ok: false, statusCode: 502, detalle: ultimo?.message || "Error de red" };
+}
+
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
@@ -73,10 +155,7 @@ app.get(
       entidad,
       departamento,
       estado,
-      modalidad,
-      soloConPliego,
       soloAbiertos = "1",
-      soloConDocumentos,
       fechaDesde,
       fechaHasta,
       presupuestoMin,
@@ -92,11 +171,7 @@ app.get(
       entidad,
       departamento,
       estado,
-      modalidad,
-      soloConPliego: soloConPliego === "1" || soloConPliego === "true",
       soloAbiertos: soloAbiertos === "1" || soloAbiertos === "true",
-      soloConDocumentos:
-        soloConDocumentos === "1" || soloConDocumentos === "true",
       fechaDesde,
       fechaHasta,
       presupuestoMin,
@@ -225,36 +300,25 @@ app.get(
   "/api/documentos/:id/descargar",
   asyncHandler(async (req, res) => {
     const docId = req.params.id;
-    const meta = await getDocumentoMeta(docId);
+    const meta = await getDocumentoMeta(docId).catch(() => null);
+    const ext = extDe(meta?.nombre_archivo, meta?.extensi_n);
     const filename = sanitizeFilename(
-      meta?.nombre_archivo || `documento_${docId}.bin`,
+      nombreConExtension(meta?.nombre_archivo, ext) || `documento_${docId}.bin`,
     );
     const url = buildDocUrl(docId);
 
-    const upstream = await downloadFromSecop(url);
-
-    if (upstream.statusCode < 200 || upstream.statusCode >= 300) {
-      const text = await upstream.body.text();
-      return res.status(upstream.statusCode).json({
+    const r = await descargarDocABuffer(url);
+    if (!r.ok) {
+      return res.status(r.statusCode || 502).json({
         error: "No se pudo descargar el documento desde SECOP II",
-        details: text.slice(0, 300),
+        details: r.detalle,
       });
     }
 
-    const ct = upstream.headers["content-type"] || "application/octet-stream";
-    const cl = upstream.headers["content-length"];
-    res.setHeader("Content-Type", ct);
-    if (cl) res.setHeader("Content-Length", cl);
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${filename}"`,
-    );
-
-    upstream.body.pipe(res);
-    upstream.body.on("error", (err) => {
-      if (!res.headersSent) res.status(502);
-      res.end();
-    });
+    res.setHeader("Content-Type", tipoContenido(ext, r.headers["content-type"]));
+    res.setHeader("Content-Length", r.buffer.length);
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.end(r.buffer);
   }),
 );
 
@@ -280,33 +344,28 @@ app.get(
     const used = new Set();
     for (const d of docs) {
       const url = buildDocUrl(d.id_documento);
-      let name = sanitizeFilename(d.nombre_archivo || `${d.id_documento}.bin`);
+      const ext = extDe(d.nombre_archivo, d.extensi_n);
+      let name = sanitizeFilename(
+        nombreConExtension(d.nombre_archivo, ext) || `${d.id_documento}.bin`,
+      );
       if (used.has(name.toLowerCase())) {
         const dot = name.lastIndexOf(".");
-        const base = dot > 0 ? name.slice(0, dot) : name;
-        const ext = dot > 0 ? name.slice(dot) : "";
-        name = `${base}_${d.id_documento}${ext}`;
+        const baseN = dot > 0 ? name.slice(0, dot) : name;
+        const extN = dot > 0 ? name.slice(dot) : "";
+        name = `${baseN}_${d.id_documento}${extN}`;
       }
       used.add(name.toLowerCase());
 
-      try {
-        const upstream = await downloadFromSecop(url);
-        if (upstream.statusCode >= 200 && upstream.statusCode < 300) {
-          archive.append(upstream.body, { name });
-          await new Promise((resolve, reject) => {
-            upstream.body.on("end", resolve);
-            upstream.body.on("error", reject);
-          });
-        } else {
-          archive.append(
-            `No se pudo descargar (HTTP ${upstream.statusCode})\nURL: ${url}\n`,
-            { name: `ERROR_${name}.txt` },
-          );
-        }
-      } catch (err) {
-        archive.append(`Error al descargar: ${err.message}\nURL: ${url}\n`, {
-          name: `ERROR_${name}.txt`,
-        });
+      // Descargamos a buffer (completo o nada) antes de añadir al ZIP: así una
+      // descarga truncada nunca se cuela como entrada corrupta.
+      const r = await descargarDocABuffer(url);
+      if (r.ok) {
+        archive.append(r.buffer, { name });
+      } else {
+        archive.append(
+          `No se pudo descargar (HTTP ${r.statusCode})\n${r.detalle || ""}\nURL: ${url}\n`,
+          { name: `ERROR_${name}.txt` },
+        );
       }
     }
 

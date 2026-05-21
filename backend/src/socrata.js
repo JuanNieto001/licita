@@ -38,19 +38,17 @@ const OPEN_PROCESS_WHERE =
   "'Fase de Selección (Presentación de ofertas)'" +
   ")";
 
-// Modalidades que tienen pliego de condiciones formal con Formato 1, 2, 3, anexos,
-// experiencia, puntaje por emprendimiento de mujeres (Ley 2069/2020), etc.
-export const MODALIDADES_CON_PLIEGO = [
+// Solo licitaciones públicas (LP)
+const LP_MODALIDADES = [
   "Licitación pública",
   "Licitación pública Obra Publica",
   "Licitación Pública Acuerdo Marco de Precios",
-  "Selección Abreviada de Menor Cuantía",
-  "Selección abreviada subasta inversa",
-  "Seleccion Abreviada Menor Cuantia Sin Manifestacion Interes",
-  "Concurso de méritos abierto",
-  "Concurso de méritos con precalificación",
-  "Mínima cuantía",
 ];
+
+const LP_WHERE =
+  "(" +
+  LP_MODALIDADES.map((m) => `modalidad_de_contratacion='${m}'`).join(" OR ") +
+  ")";
 
 function combineWhere(...clauses) {
   return clauses.filter(Boolean).map((c) => `(${c})`).join(" AND ");
@@ -62,30 +60,64 @@ const APP_TOKEN = process.env.SOCRATA_APP_TOKEN || "";
 
 const baseHeaders = APP_TOKEN ? { "X-App-Token": APP_TOKEN } : {};
 
-async function socrataGet(url, params = {}) {
+function esErrorTransitorio(e) {
+  if (!e) return false;
+  if (e.transitorio) return true;
+  const code = e.code || "";
+  return (
+    code === "UND_ERR_HEADERS_TIMEOUT" ||
+    code === "UND_ERR_BODY_TIMEOUT" ||
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    code === "UND_ERR_SOCKET" ||
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    e.name === "AbortError" ||
+    /timeout|aborted|socket/i.test(e.message || "")
+  );
+}
+
+// datos.gov.co es lento y devuelve timeouts intermitentes. Reintentamos los
+// fallos transitorios para no perder resultados (p.ej. documentos de un proceso).
+async function socrataGet(url, params = {}, { maxIntentos = 3 } = {}) {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== "") qs.append(k, v);
   }
   const full = `${url}?${qs.toString()}`;
-  const cacheKey = full;
-  const cached = cache.get(cacheKey);
+  const cached = cache.get(full);
   if (cached) return cached;
 
-  const { statusCode, body } = await request(full, {
-    headers: baseHeaders,
-    headersTimeout: 30000,
-    bodyTimeout: 60000,
-  });
-  if (statusCode < 200 || statusCode >= 300) {
-    const text = await body.text();
-    const err = new Error(`Socrata ${statusCode}: ${text.slice(0, 300)}`);
-    err.statusCode = statusCode;
-    throw err;
+  let ultimoError;
+  for (let intento = 1; intento <= maxIntentos; intento++) {
+    try {
+      const { statusCode, body } = await request(full, {
+        headers: baseHeaders,
+        headersTimeout: 30000,
+        bodyTimeout: 60000,
+      });
+      if (statusCode >= 500 || statusCode === 429) {
+        await body.text().catch(() => {});
+        throw Object.assign(new Error(`Socrata ${statusCode} (transitorio)`), {
+          statusCode,
+          transitorio: true,
+        });
+      }
+      if (statusCode < 200 || statusCode >= 300) {
+        const text = await body.text();
+        throw Object.assign(new Error(`Socrata ${statusCode}: ${text.slice(0, 300)}`), {
+          statusCode,
+        });
+      }
+      const json = await body.json();
+      cache.set(full, json);
+      return json;
+    } catch (e) {
+      ultimoError = e;
+      if (!esErrorTransitorio(e) || intento === maxIntentos) throw e;
+      await new Promise((r) => setTimeout(r, 400 * intento));
+    }
   }
-  const json = await body.json();
-  cache.set(cacheKey, json);
-  return json;
+  throw ultimoError;
 }
 
 function escapeSoql(value) {
@@ -125,10 +157,7 @@ export async function listLicitaciones({
   entidad,
   departamento,
   estado,
-  modalidad,
-  soloConPliego,
   soloAbiertos = true,
-  soloConDocumentos = false,
   fechaDesde,
   fechaHasta,
   presupuestoMin,
@@ -150,13 +179,6 @@ export async function listLicitaciones({
   if (!soloAbiertos && estado) {
     where.push(`estado_del_procedimiento='${escapeSoql(estado)}'`);
   }
-  if (modalidad) where.push(`modalidad_de_contratacion='${escapeSoql(modalidad)}'`);
-  if (soloConPliego) {
-    const list = MODALIDADES_CON_PLIEGO
-      .map((m) => `'${escapeSoql(m)}'`)
-      .join(",");
-    where.push(`modalidad_de_contratacion in(${list})`);
-  }
   if (fechaDesde) where.push(`fecha_de_publicacion_del >= '${escapeSoql(fechaDesde)}T00:00:00.000'`);
   if (fechaHasta) where.push(`fecha_de_publicacion_del <= '${escapeSoql(fechaHasta)}T23:59:59.999'`);
   if (presupuestoMin) where.push(`precio_base >= ${Number(presupuestoMin)}`);
@@ -174,51 +196,24 @@ export async function listLicitaciones({
   const userWhere = where.length ? where.join(" AND ") : "";
   const fullWhere = combineWhere(
     INGENIERIA_CIVIL_WHERE,
+    LP_WHERE,
     soloAbiertos ? OPEN_PROCESS_WHERE : "",
     userWhere,
   );
 
-  if (!soloConDocumentos) {
-    const params = {
-      $limit: pageSize,
-      $offset: offset,
-      $order: `${sortCol} ${sortDir}`,
-      $where: fullWhere,
-    };
-    const [items, countRes] = await Promise.all([
-      socrataGet(PROCESOS, params),
-      socrataGet(PROCESOS, {
-        $select: "count(id_del_portafolio) as total",
-        $where: fullWhere,
-      }),
-    ]);
-    const total = Number(countRes?.[0]?.total ?? 0);
-    return {
-      items,
-      total,
-      page,
-      pageSize,
-      totalPages: Math.ceil(total / pageSize),
-      filtroConDocumentos: false,
-    };
-  }
-
-  // Modo "solo con documentos": el orden por fecha desc deja arriba los procesos
-  // más recientes, cuyos documentos suelen aún no estar indexados en los datasets
-  // de SECOP (retraso ~2 meses). Por eso muestreamos un universo grande FIJO
-  // (no proporcional a pageSize) para alcanzar también procesos más antiguos
-  // que sí tengan documentos publicados.
+  // Siempre filtrar por licitaciones que tienen documentos descargables.
+  // Muestreamos un universo grande para alcanzar procesos más antiguos
+  // que sí tengan documentos publicados (retraso SECOP ~2 meses).
   const HARD_CAP = 2000;
-  const candidatesNeeded = HARD_CAP;
   const candidates = await socrataGet(PROCESOS, {
-    $limit: candidatesNeeded,
+    $limit: HARD_CAP,
     $offset: 0,
     $order: `${sortCol} ${sortDir}`,
     $where: fullWhere,
   });
 
   if (!candidates.length) {
-    return { items: [], total: 0, page, pageSize, totalPages: 0, filtroConDocumentos: true };
+    return { items: [], total: 0, page, pageSize, totalPages: 0 };
   }
 
   // 1. De-duplicar candidatos (SECOP puede devolver el mismo ID varias veces)
@@ -231,13 +226,19 @@ export async function listLicitaciones({
     }
   }
 
-  // 2. Cruce batch rápido con datasets de documentos (pre-filtro)
+  // 2. Cruce batch PARALELO con datasets de documentos
+  //    Chunks se procesan todos a la vez en lugar de secuencialmente.
   const uniqueIds = uniqueCandidates.map((c) => c.id_del_portafolio);
-  const CHUNK = 80;
-  const conDocs = new Set();
+  const CHUNK = 150;
+  const chunks = [];
   for (let i = 0; i < uniqueIds.length; i += CHUNK) {
-    const chunk = uniqueIds.slice(i, i + CHUNK);
-    const found = await getProcesosConDocs(chunk);
+    chunks.push(uniqueIds.slice(i, i + CHUNK));
+  }
+  const chunkResults = await Promise.all(
+    chunks.map((chunk) => getProcesosConDocs(chunk)),
+  );
+  const conDocs = new Set();
+  for (const found of chunkResults) {
     for (const p of found) conDocs.add(p);
   }
 
@@ -254,8 +255,7 @@ export async function listLicitaciones({
     page,
     pageSize,
     totalPages,
-    filtroConDocumentos: true,
-    aproximado: candidatesNeeded >= HARD_CAP,
+    aproximado: uniqueCandidates.length >= HARD_CAP,
   };
 }
 
@@ -270,9 +270,15 @@ export async function getLicitacion(idPortafolio) {
 export async function getDocumentosPorProceso(idPortafolio) {
   const id = escapeSoql(idPortafolio);
   const where = `proceso='${id}'`;
+  // $limit alto: algunos procesos grandes superan los 200 documentos (planos,
+  // anexos, adendas). Cada dataset se consulta con reintentos; si uno falla de
+  // forma definitiva lo registramos en vez de descartarlo en silencio.
   const results = await Promise.all(
     DOC_DATASETS.map((url) =>
-      socrataGet(url, { $where: where, $limit: 200 }).catch(() => []),
+      socrataGet(url, { $where: where, $limit: 1000 }).catch((e) => {
+        console.warn(`[docs] dataset ${url} falló para ${idPortafolio}: ${e.message}`);
+        return [];
+      }),
     ),
   );
   const flat = results.flat();
@@ -303,25 +309,20 @@ export async function getFacets() {
   const cached = cache.get(cacheKey);
   if (cached) return cached;
 
-  const [estados, departamentos, modalidades] = await Promise.all([
+  const baseWhere = combineWhere(INGENIERIA_CIVIL_WHERE, LP_WHERE);
+
+  const [estados, departamentos] = await Promise.all([
     socrataGet(PROCESOS, {
       $select: "estado_del_procedimiento, count(*) as c",
-      $where: INGENIERIA_CIVIL_WHERE,
+      $where: baseWhere,
       $group: "estado_del_procedimiento",
       $order: "c DESC",
       $limit: 50,
     }).catch(() => []),
     socrataGet(PROCESOS, {
       $select: "departamento_entidad, count(*) as c",
-      $where: INGENIERIA_CIVIL_WHERE,
+      $where: baseWhere,
       $group: "departamento_entidad",
-      $order: "c DESC",
-      $limit: 50,
-    }).catch(() => []),
-    socrataGet(PROCESOS, {
-      $select: "modalidad_de_contratacion, count(*) as c",
-      $where: INGENIERIA_CIVIL_WHERE,
-      $group: "modalidad_de_contratacion",
       $order: "c DESC",
       $limit: 50,
     }).catch(() => []),
@@ -329,10 +330,6 @@ export async function getFacets() {
   const facets = {
     estados: estados.map((e) => e.estado_del_procedimiento).filter(Boolean),
     departamentos: departamentos.map((d) => d.departamento_entidad).filter(Boolean),
-    modalidades: modalidades
-      .map((m) => m.modalidad_de_contratacion)
-      .filter(Boolean),
-    modalidadesConPliego: MODALIDADES_CON_PLIEGO,
   };
   cache.set(cacheKey, facets, 3600);
   return facets;

@@ -79,64 +79,25 @@ export default function Filters({
           )}
 
           <div className="rounded-xl bg-brand-50 dark:bg-brand-500/10 ring-1 ring-brand-200 dark:ring-brand-500/20 p-3">
-            <label className="flex items-start gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                className="mt-0.5 rounded text-brand-600 focus:ring-brand-500"
-                checked={!!filters.soloConPliego}
-                onChange={(e) => set("soloConPliego", e.target.checked ? "1" : "")}
-              />
-              <span className="text-sm">
-                <span className="font-medium text-slate-800 dark:text-slate-100">
-                  Solo procesos con pliego
-                </span>
-                <span className="block text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                  Licitación pública, selección abreviada, concurso de méritos y
-                  mínima cuantía. Son los que tienen pliego de condiciones,
-                  formatos y anexos.
-                </span>
-              </span>
-            </label>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-brand-800 dark:text-brand-200">★ Solo Licitaciones Públicas (LP)</span>
+            </div>
+            <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
+              Los resultados muestran únicamente procesos de Licitación Pública de ingeniería civil.
+            </p>
           </div>
 
           <div className="rounded-xl bg-violet-50 dark:bg-violet-500/10 ring-1 ring-violet-200 dark:ring-violet-500/20 p-3">
-            <label className="flex items-start gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                className="mt-0.5 rounded text-violet-600 focus:ring-violet-500"
-                checked={!!filters.soloConDocumentos}
-                onChange={(e) =>
-                  set("soloConDocumentos", e.target.checked ? "1" : "")
-                }
-              />
-              <span className="text-sm">
-                <span className="font-medium text-slate-800 dark:text-slate-100">
-                  Solo con documentos
-                </span>
-                <span className="block text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                  Muestra únicamente licitaciones que tienen documentos
-                  descargables (PDF, Word, Excel, ZIP, etc.). La API pública
-                  tiene un retraso de ~2 meses; los procesos abiertos muy
-                  recientes pueden no tener formatos aún.
-                </span>
-              </span>
-            </label>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-violet-800 dark:text-violet-200">📄 Solo con documentos descargables</span>
+            </div>
+            <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
+              Se muestran únicamente licitaciones que tienen documentos
+              descargables (PDF, Word, etc.) en la API pública de SECOP II.
+            </p>
           </div>
 
-          <Field label="Modalidad de contratación">
-            <select
-              className="input"
-              value={filters.modalidad || ""}
-              onChange={(e) => set("modalidad", e.target.value)}
-            >
-              <option value="">Todas</option>
-              {(facets?.modalidades || []).map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          </Field>
+
 
           <Field label="Departamento">
             <select

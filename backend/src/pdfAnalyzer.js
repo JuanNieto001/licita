@@ -31,14 +31,24 @@ export function elegirPliego(docs) {
   const score = (d) => {
     const n = nombreNormalizado(d);
     let s = 0;
-    if (n.includes("pliego")) s += 10;
+    // Palabras clave positivas — nombre completo y abreviaciones
+    if (n.includes("pliego") || n.includes("plieg")) s += 12;
     if (n.includes("condiciones")) s += 6;
-    if (n.includes("definitivo")) s += 8;
+    if (n.includes("condic") && !n.includes("condiciones")) s += 4;
+    if (n.includes("definitivo")) s += 10;
+    if (n.includes("definit") && !n.includes("definitivo")) s += 7;
+    if (/\bdef\b/.test(n) || n.endsWith(" def") || n.endsWith("_def")) s += 5;
     if (n.includes("proyecto")) s += 2;
-    if (n.includes("adenda")) s -= 12;
-    if (n.includes("respuesta")) s -= 8;
-    if (n.includes("observa")) s -= 6;
-    if (n.includes("anexo")) s -= 4;
+    // Penalizaciones — documentos que no son el pliego
+    if (n.includes("adenda")) s -= 15;
+    if (n.includes("respuesta")) s -= 12;
+    if (n.includes("observa")) s -= 10;
+    if (n.includes("anexo")) s -= 6;
+    if (n.includes("acta")) s -= 8;
+    if (n.includes("resoluci")) s -= 8;
+    if (n.includes("informe")) s -= 5;
+    if (n.includes("aviso")) s -= 8;
+    if (n.includes("formato")) s -= 4;
     return s;
   };
 
@@ -50,16 +60,9 @@ export function elegirPliego(docs) {
   });
 
   const top = ranked[0];
+  // Si el mejor candidato tiene score ≤ 0 no es un pliego reconocible → error
   if (score(top) <= 0) {
-    const porTamano = [...pdfs].sort(
-      (a, b) =>
-        (Number(b.tamanno_archivo) || 0) - (Number(a.tamanno_archivo) || 0),
-    )[0];
-    return {
-      id: porTamano.id_documento,
-      nombre: porTamano.nombre_archivo,
-      tamano: Number(porTamano.tamanno_archivo) || 0,
-    };
+    return null;
   }
 
   return {
@@ -151,6 +154,15 @@ async function obtenerMarkdownPliego(doc) {
   return { md, cacheado: false, mdPath };
 }
 
+// Patrones para "desempate" — búsqueda primaria
+const DESEMPATE_PATTERNS = [
+  /criterios?\s+de\s+evaluaci[oó]n.*asignaci[oó]n.*puntaje.*criterios?\s+de\s+desempate/i,
+  /asignaci[oó]n\s+de\s+puntaje.*desempate/i,
+  /criterios?\s+de\s+desempate/i,
+  /desempate/i,
+];
+
+// Patrones fallback — encabezados clásicos de sección de criterios
 const ENCABEZADOS_CRITERIOS = [
   /factores?\s+de\s+evaluaci[oó]n/i,
   /criterios?\s+de\s+evaluaci[oó]n/i,
@@ -178,15 +190,23 @@ const NOMBRES_EXCLUIDOS = new Set([
 // contacto del organismo contratante, encabezados de tabla, etc.). Si la línea
 // contiene cualquiera de estas marcas, se descarta antes de aplicar regex.
 const REGEX_LINEAS_NO_CRITERIO = [
-  /\bp[áa]gina\s+\d+\s+de\s+\d+/i,
-  /\bversi[óo]n\s+\d+/i,
-  /\bc[óo]digo\s+[A-Z]/i,
+  // Encabezados/pies de página: toleran ":" tras la etiqueta
+  // ("Página: 16 de 75", "Versión No.: 8", "Código: CCE-EICP-GI-01").
+  /\bp[áa]gina\s*:?\s*\d+\s+de\s+\d+/i,
+  /\bversi[óo]n\s*(?:n[o°º]\.?)?\s*:?\s*\d/i,
+  /\bc[óo]digo\s*:?\s*[A-Z]/i,
+  /\bc[óo]digo\s+postal/i,
   /\bNIT\b/i,
   /\bcra?\.?\s+\d+/i,
   /\bcalle\s+\d+/i,
   /\btel[ée]fono|\btel[.:]\s*\(?\d/i,
   /^no\.?\s+\d+\s*$/i,
 ];
+
+// Regex para detectar una línea que parece ser una fila de tabla de puntajes:
+// texto descriptivo seguido de un número al EXTREMO DERECHO de la línea.
+// Esto es la firma de "puntaje como columna derecha".
+const REGEX_FILA_TABLA_PUNTAJE = /^.{4,}\s+(\d{1,4}(?:[.,]\d{1,3})?)\s*(?:puntos|pts|%)?\.?\s*$/i;
 
 function limpiarNombreCriterio(nombre) {
   return nombre
@@ -204,40 +224,29 @@ function parsearNumero(s) {
   return Number(conPunto);
 }
 
-function encontrarBloqueCriterios(lineas) {
-  const headerHits = [];
-  const proseHits = [];
-  for (let i = 0; i < lineas.length; i++) {
-    const l = lineas[i];
-    if (!ENCABEZADOS_CRITERIOS.some((re) => re.test(l))) continue;
-    if (/^#{1,6}\s/.test(l)) headerHits.push(i);
-    else proseHits.push(i);
+/**
+ * Verifica que cerca de una línea candidata (hacia abajo) haya líneas con
+ * puntajes numéricos EN EL EXTREMO DERECHO (columna derecha de una tabla).
+ * Esto distingue la tabla de puntajes de menciones textuales o tablas
+ * donde los números están en el medio.
+ */
+function tieneTablaPuntajesCerca(lineas, idx, ventana = 40) {
+  let filasConPuntajeDerecho = 0;
+  const fin = Math.min(lineas.length, idx + ventana);
+  for (let i = idx + 1; i < fin; i++) {
+    const l = lineas[i].trim();
+    if (!l) continue;
+    if (REGEX_TOC.test(l)) continue;
+    if (REGEX_FILA_TABLA_PUNTAJE.test(l)) filasConPuntajeDerecho++;
   }
-
-  for (const idx of headerHits) {
-    const ventana = lineas.slice(idx, idx + 8);
-    const tocCount = ventana.filter((l) => REGEX_TOC.test(l)).length;
-    if (tocCount < 3) return idx;
-  }
-  if (headerHits.length > 0) return headerHits[headerHits.length - 1];
-
-  for (const idx of proseHits) {
-    const ventana = lineas.slice(idx, idx + 8);
-    const tocCount = ventana.filter((l) => REGEX_TOC.test(l)).length;
-    if (tocCount < 3) return idx;
-  }
-  return proseHits.length > 0 ? proseHits[0] : null;
+  return filasConPuntajeDerecho >= 2;
 }
 
-export function extraerCriterios(md) {
-  if (!md || typeof md !== "string") {
-    return { criterios: [], puntajeTotal: 0 };
-  }
-
-  const lineas = md.split(/\r?\n/);
-  const inicio = encontrarBloqueCriterios(lineas);
-  if (inicio == null) return { criterios: [], puntajeTotal: 0 };
-
+/**
+ * Extrae criterios de un bloque específico de líneas.
+ * Retorna { criterios, puntajeTotal } o null si no se encontraron criterios válidos.
+ */
+function extraerCriteriosDeBloque(lineas, inicio) {
   const maxLineas = 400;
   let fin = Math.min(lineas.length, inicio + maxLineas);
   for (let i = inicio + 4; i < fin; i++) {
@@ -259,7 +268,7 @@ export function extraerCriterios(md) {
     {
       // Separador `:` admite cualquier contexto; los guiones requieren espacio
       // antes para no capturar NITs ("899.999.475-4") ni códigos ("CCE-EICP-GI-02").
-      re: /^(.+?)(?::\s*|\s+[\-–]\s*)(\d{1,4}(?:[.,]\d{1,3})?)\s*(puntos|pts|%)?\s*$/i,
+      re: /^(.+?)(?::\s*|\s+[\-–]\s*)(\d{1,4}(?:[.,]\d{1,3})?)\s*(puntos|pts|%)?$/i,
       withUnit: false,
     },
     {
@@ -296,7 +305,12 @@ export function extraerCriterios(md) {
       const puntaje = parsearNumero(m[2]);
       if (!nombre || nombre.length < 3 || nombre.length > 140) break;
       if (NOMBRES_EXCLUIDOS.has(nombre.toLowerCase())) break;
-      if (/^\d/.test(nombre)) break;
+      // El nombre debe empezar por letra (descarta números y filas de tablas con
+      // columnas mal alineadas como ",51 Mayores" o "0,75 ...").
+      if (!/^[A-Za-zÁÉÍÓÚÑáéíóúñ(]/.test(nombre)) break;
+      // …y tener contenido alfabético real (evita "0,51 0,75", "1,00 1,50").
+      const letras = (nombre.match(/[A-Za-zÁÉÍÓÚÑáéíóúñ]/g) || []).length;
+      if (letras < 3) break;
       if (!Number.isFinite(puntaje) || puntaje <= 0 || puntaje > 1000) break;
 
       const unidad = (m[3] || "").toLowerCase().includes("%")
@@ -326,9 +340,119 @@ export function extraerCriterios(md) {
     }
   }
 
+  if (criterios.length === 0) return null;
+
   const puntajeTotal =
     Math.round(criterios.reduce((s, c) => s + c.puntaje, 0) * 100) / 100;
   return { criterios, puntajeTotal };
+}
+
+/**
+ * Desempata entre tablas candidatas YA validadas (suman ~100, ver buscarMejorTabla).
+ * Prefiere la que tiene más criterios y la que trae los puntajes en la columna del
+ * extremo derecho.
+ */
+function scoreCandidato(resultado, puntajeDerecho = false) {
+  if (!resultado || resultado.criterios.length === 0) return -Infinity;
+  let score = resultado.criterios.length * 2; // más criterios = mejor
+  if (puntajeDerecho) score += 40; // puntajes en la columna del extremo derecho
+  return score;
+}
+
+/**
+ * Recolecta TODAS las posiciones candidatas de tablas de puntajes,
+ * extrae los criterios de cada una, y devuelve la mejor.
+ */
+function buscarMejorTabla(lineas) {
+  // posición → ¿tiene la tabla los puntajes en la columna del extremo derecho?
+  const candidatos = new Map();
+
+  // Recolectar todas las posiciones candidatas
+  function recolectar(patrones, requierePuntajeDerecho) {
+    for (const patron of patrones) {
+      for (let i = 0; i < lineas.length; i++) {
+        const l = lineas[i];
+        if (!patron.test(l)) continue;
+        // Saltar si es parte del TOC
+        const ventana = lineas.slice(i, i + 8);
+        const tocCount = ventana.filter((l) => REGEX_TOC.test(l)).length;
+        if (tocCount >= 3) continue;
+        const puntajeDerecho = tieneTablaPuntajesCerca(lineas, i);
+        if (requierePuntajeDerecho && !puntajeDerecho) continue;
+        // Conservar la señal más fuerte si la posición ya estaba registrada
+        candidatos.set(i, candidatos.get(i) || puntajeDerecho);
+      }
+    }
+  }
+
+  // Fase 1: desempate (con validación de tabla con puntajes a la derecha)
+  recolectar(DESEMPATE_PATTERNS, true);
+  // Fase 2: encabezados clásicos (con validación de tabla con puntajes a la derecha)
+  recolectar(ENCABEZADOS_CRITERIOS, true);
+  // Fase 3: encabezados clásicos SIN exigir puntajes a la derecha (último recurso)
+  recolectar(ENCABEZADOS_CRITERIOS, false);
+
+  // De-duplicar posiciones cercanas (±5 líneas), conservando la marca de
+  // "puntaje en columna derecha" si alguna de las cercanas la tiene.
+  const uniquePos = [];
+  for (const [pos, derecho] of candidatos) {
+    const cercano = uniquePos.find((u) => Math.abs(u.pos - pos) <= 5);
+    if (cercano) {
+      cercano.derecho = cercano.derecho || derecho;
+    } else {
+      uniquePos.push({ pos, derecho });
+    }
+  }
+
+  // Filtro: si existe al menos una tabla con los puntajes en la columna del
+  // extremo derecho, descartamos las demás (esa es la tabla de criterios real).
+  // Solo si ninguna candidata la tiene caemos al resto como último recurso.
+  const conDerecho = uniquePos.filter((u) => u.derecho);
+  const finalistas = conDerecho.length ? conDerecho : uniquePos;
+
+  // Extraer criterios de cada finalista (conservando su marca de columna derecha).
+  const evaluados = [];
+  for (const { pos, derecho } of finalistas) {
+    const resultado = extraerCriteriosDeBloque(lineas, pos);
+    if (resultado) evaluados.push({ resultado, derecho });
+  }
+
+  // Filtro principal: la tabla de criterios correcta SIEMPRE suma 100 puntos.
+  // Solo aceptamos candidatas cuyo total sea 100 (±1 por redondeo). Como último
+  // recurso admitimos la escala de 1000 (±10) que usan algunos pliegos. Si
+  // ninguna candidata cuadra con un total esperado, no hay tabla confiable.
+  const cerca = (objetivo, tol) =>
+    evaluados.filter(
+      (e) => Math.abs(e.resultado.puntajeTotal - objetivo) <= tol,
+    );
+  const elegibles = cerca(100, 1).length ? cerca(100, 1) : cerca(1000, 10);
+  if (!elegibles.length) return null;
+
+  // Entre las válidas, la mejor: más criterios y puntajes en la columna derecha.
+  let mejor = null;
+  let mejorScore = -Infinity;
+  for (const { resultado, derecho } of elegibles) {
+    const s = scoreCandidato(resultado, derecho);
+    if (s > mejorScore) {
+      mejorScore = s;
+      mejor = resultado;
+    }
+  }
+
+  return mejor;
+}
+
+export function extraerCriterios(md) {
+  if (!md || typeof md !== "string") {
+    return { criterios: [], puntajeTotal: 0 };
+  }
+
+  const lineas = md.split(/\r?\n/);
+  const resultado = buscarMejorTabla(lineas);
+  if (!resultado) return { criterios: [], puntajeTotal: 0 };
+
+  // Los puntajes se devuelven tal como aparecen en el pliego (sin reescalar).
+  return resultado;
 }
 
 export async function analizarPliego(idPortafolio) {
@@ -336,6 +460,7 @@ export async function analizarPliego(idPortafolio) {
   const pliego = elegirPliego(docs);
 
   if (!pliego) {
+    const hasPdfs = docs.some((d) => (d?.extensi_n || "").toLowerCase() === "pdf");
     return {
       id_portafolio: idPortafolio,
       documento_analizado: null,
@@ -343,7 +468,11 @@ export async function analizarPliego(idPortafolio) {
       markdown_cacheado: false,
       criterios: [],
       puntaje_total: 0,
-      advertencias: ["No se encontraron PDFs en esta licitación"],
+      advertencias: [
+        hasPdfs
+          ? "No se pudo identificar el pliego de condiciones definitivo entre los PDFs disponibles. Ningún documento coincide con las palabras clave esperadas (pliego, definitivo, condiciones)."
+          : "No se encontraron PDFs en esta licitación.",
+      ],
       analizado_en: new Date().toISOString(),
     };
   }

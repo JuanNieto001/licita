@@ -16,24 +16,29 @@ export default function LicitacionCard({ item, onClick }) {
       className="card p-5 text-left w-full group animate-slide-up"
     >
       <div className="flex items-start justify-between gap-3 mb-3">
-        <div className="flex flex-wrap gap-1.5">
-          <span className={`badge ${badgeClasses(color)}`}>
-            <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" />
-            {item.estado_del_procedimiento || "Sin estado"}
-          </span>
-          {item.fase &&
-            (item.fase.toLowerCase().includes("oferta") ||
-              item.fase.toLowerCase().includes("observ")) && (
-              <span className="badge bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-300">
-                {item.fase}
-              </span>
-            )}
-        </div>
+        <span className={`badge ${badgeClasses(color)}`}>
+          <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" />
+          {item.estado_del_procedimiento || "Sin estado"}
+        </span>
         <span className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1 shrink-0">
           <I.Clock className="w-3.5 h-3.5" />
           {formatDateRel(item.fecha_de_publicacion_del)}
         </span>
       </div>
+
+      {item.fase &&
+        (item.fase.toLowerCase().includes("oferta") ||
+          item.fase.toLowerCase().includes("observ")) && (
+          <div className="w-full rounded-lg bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-300 px-3 py-1.5 text-xs font-medium mb-3">
+            {item.fase}
+          </div>
+        )}
+
+      {item.referencia_del_proceso && (
+        <div className="text-sm font-bold text-indigo-600 dark:text-indigo-400 mb-1 tracking-wide">
+          {item.referencia_del_proceso}
+        </div>
+      )}
 
       <h3 className="font-semibold text-slate-900 dark:text-slate-50 leading-snug mb-1.5 line-clamp-2 group-hover:text-brand-600 dark:group-hover:text-brand-400 transition-colors">
         {item.nombre_del_procedimiento || "Sin título"}

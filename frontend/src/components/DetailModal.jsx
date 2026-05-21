@@ -61,7 +61,12 @@ export default function DetailModal({ licitacion, onClose }) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = doc.nombre_archivo || `documento_${docId}`;
+      const nombre = doc.nombre_archivo || `documento_${docId}`;
+      const ext = (doc.extensi_n || "").toLowerCase();
+      a.download =
+        ext && !new RegExp(`\\.${ext}$`, "i").test(nombre)
+          ? `${nombre}.${ext}`
+          : nombre;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -179,11 +184,16 @@ export default function DetailModal({ licitacion, onClose }) {
             <span className={`badge ${badgeClasses(color)}`}>
               {licitacion.estado_del_procedimiento || "Sin estado"}
             </span>
-            <h2 className="mt-2 font-bold text-xl text-slate-900 dark:text-slate-50 leading-snug">
+            {licitacion.referencia_del_proceso && (
+              <div className="mt-2 text-base font-bold text-indigo-600 dark:text-indigo-400 tracking-wide">
+                {licitacion.referencia_del_proceso}
+              </div>
+            )}
+            <h2 className="mt-1 font-bold text-xl text-slate-900 dark:text-slate-50 leading-snug">
               {licitacion.nombre_del_procedimiento}
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 font-mono">
-              {licitacion.id_del_portafolio} · {licitacion.referencia_del_proceso || "—"}
+              {licitacion.id_del_portafolio}
             </p>
           </div>
           <button

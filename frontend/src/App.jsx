@@ -30,7 +30,6 @@ export default function App() {
     pageSize: PAGE_SIZE,
     ordenarPor: "fecha_de_publicacion_del",
     orden: "DESC",
-    soloConPliego: "1",
     soloAbiertos: "1",
   });
   const [data, setData] = useState(null);
@@ -152,7 +151,6 @@ export default function App() {
       pageSize: PAGE_SIZE,
       ordenarPor: "fecha_de_publicacion_del",
       orden: "DESC",
-      soloConPliego: "1",
       soloAbiertos: "1",
     });
     setSearch("");
@@ -318,17 +316,14 @@ export default function App() {
               <div className="text-slate-600 dark:text-slate-400 mb-3">
                 No se encontraron licitaciones con esos criterios.
               </div>
-              {filters.soloAbiertos && filters.soloConDocumentos && (
+              {filters.soloAbiertos && (
                 <div className="rounded-xl bg-amber-50 dark:bg-amber-500/10 ring-1 ring-amber-200 dark:ring-amber-500/20 p-4 text-sm text-amber-800 dark:text-amber-200 text-left">
                   <strong>Tip:</strong> el dataset abierto de SECOP II tiene un
                   retraso de ~2 meses, por lo que los procesos
                   <em> recién publicados (abiertos)</em> normalmente todavía no
-                  tienen sus formatos en la API. Probá desactivar
+                  tienen sus documentos indexados. Probá desactivar
                   <strong> "Solo abiertos para postularse"</strong> para ver
-                  procesos con formatos descargables, o desactivá
-                  <strong> "Solo con documentos descargables"</strong> para ver
-                  los procesos abiertos actuales (y abrirlos directamente en
-                  SECOP II).
+                  procesos más antiguos que sí tengan documentos descargables.
                 </div>
               )}
             </div>
