@@ -173,6 +173,17 @@ const ENCABEZADOS_CRITERIOS = [
   /puntajes?\s+a\s+asignar/i,
 ];
 
+// Encabezados de un "cuadro de puntajes": una fila de títulos de tabla que
+// menciona PUNTAJE (p.ej. "FACTOR PUNTAJE MÁXIMO", "DESCRIPCIÓN PUNTAJE",
+// "EXPERIENCIA GENERAL PUNTAJE"). El formato varía y el cuadro puede partirse en
+// varias páginas, por eso se extrae con un lector tolerante (extraerCuadroPuntaje).
+const ENCABEZADOS_PUNTAJE = [
+  /^#{0,6}\s*(?:factor|concepto|descripci[oó]n|criterio|item|[ií]tem|experiencia)\b.*\bpuntaje/i,
+  /\bpuntaje\s+m[áa]xim[oa]\b/i,
+  /^#{1,6}\s+.*\bpuntajes?\s*$/i, // encabezado markdown que TERMINA en "PUNTAJE"
+  /^#{0,6}\s*.{0,18}\bpuntajes?\s*$/i, // encabezado de columna corto ("Puntaje")
+];
+
 const REGEX_TOC = /\.{3,}\s*\d{1,3}\s*$/;
 const NOMBRES_EXCLUIDOS = new Set([
   "total",
@@ -347,6 +358,99 @@ function extraerCriteriosDeBloque(lineas, inicio) {
   return { criterios, puntajeTotal };
 }
 
+// Ruido de corte de página: cabeceras/pies repetidos del PDF que se cuelan dentro
+// de un cuadro cuando éste se parte entre páginas. Deben ignorarse, NO cerrar el
+// cuadro de puntajes.
+function esRuidoDePagina(linea) {
+  const l = linea.trim();
+  if (!l) return true;
+  if (/^--\s*\d+\s+of\s+\d+\s*--$/i.test(l)) return true; // "-- 61 of 148 --"
+  if (/^\d{1,4}$/.test(l)) return true; // número de página suelto
+  if (/@/.test(l)) return true; // correos del pie de página
+  if (/^fecha\b/i.test(l)) return true;
+  if (REGEX_TOC.test(l)) return true;
+  if (REGEX_LINEAS_NO_CRITERIO.some((re) => re.test(l))) return true;
+  // Encabezado del documento convertido a "## ENTIDAD…" (no numerado).
+  if (/^#{1,6}\s+(municipio|departamento|proceso|servicios|alcald[ií]a|gobernaci[oó]n|secretar[ií]a|nit|empresa|instituto)\b/i.test(l))
+    return true;
+  return false;
+}
+
+// Una nueva sección numerada ("## 2.6.1. …", "### 4 …") cierra el cuadro.
+function esEncabezadoSeccionNumerada(linea) {
+  return /^#{1,6}\s+\d/.test(linea.trim());
+}
+
+// Cierre del cuadro: fila "Total … N".
+const REGEX_TOTAL_CUADRO =
+  /^total(?:\s+(?:de\s+)?(?:puntos?|puntaje|m[áa]ximo))?\s*[:.]?\s*\d+(?:[.,]\d+)?\s*(?:puntos?|pts)?\.?\s*$/i;
+
+/**
+ * Lee un "cuadro de puntajes" (filtro extra pedido): un cuadro encabezado por una
+ * fila que dice PUNTAJE. Es TOLERANTE a cortes de página (salta cabeceras/pies que
+ * se repiten) y reconstruye filas partidas en dos líneas ("nombre…" + "resto N").
+ * Cierra al llegar a "Total N" o a una nueva sección numerada.
+ */
+function extraerCuadroPuntaje(lineas, inicio) {
+  const fin = Math.min(lineas.length, inicio + 120);
+  const criterios = [];
+  const vistos = new Set();
+  let prefijo = ""; // primera parte de una fila partida en dos líneas
+  let sinMatch = 0;
+
+  for (let i = inicio + 1; i < fin; i++) {
+    const linea = lineas[i].trim();
+    if (esRuidoDePagina(linea)) continue; // saltar cortes de página
+    if (esEncabezadoSeccionNumerada(linea)) break; // nueva sección → fin del cuadro
+    if (REGEX_TOTAL_CUADRO.test(linea)) break; // "Total 1000 puntos" → cierra el cuadro
+
+    const m = linea.match(/^(.+?)\s+(\d{1,4}(?:[.,]\d{1,3})?)\s*(puntos?|pts|%)?\.?\s*$/i);
+    if (m) {
+      const nombre = limpiarNombreCriterio((prefijo ? `${prefijo} ` : "") + m[1]);
+      prefijo = "";
+      const puntaje = parsearNumero(m[2]);
+      const letras = (nombre.match(/[A-Za-zÁÉÍÓÚÑáéíóúñ]/g) || []).length;
+      const valido =
+        nombre &&
+        nombre.length >= 3 &&
+        nombre.length <= 160 &&
+        letras >= 3 &&
+        /^[A-Za-zÁÉÍÓÚÑáéíóúñ(]/.test(nombre) &&
+        !NOMBRES_EXCLUIDOS.has(nombre.toLowerCase()) &&
+        Number.isFinite(puntaje) &&
+        puntaje > 0 &&
+        puntaje <= 1000;
+      if (valido && !vistos.has(nombre.toLowerCase())) {
+        vistos.add(nombre.toLowerCase());
+        criterios.push({
+          nombre,
+          puntaje: Math.round(puntaje * 100) / 100,
+          unidad: (m[3] || "").includes("%") ? "%" : "puntos",
+        });
+        sinMatch = 0;
+        continue;
+      }
+    }
+
+    // Texto sin número: puede ser la primera parte de una fila partida en dos.
+    // Ignoramos remanentes de encabezado ("máximo", "puntaje", "factor", …).
+    if (
+      /[A-Za-zÁÉÍÓÚÑáéíóúñ]/.test(linea) &&
+      !/^#{1,6}\s/.test(linea) &&
+      !/^(puntaje|m[áa]xim[oa]|factor|concepto|descripci[oó]n|criterio|item|[ií]tem)\b/i.test(linea)
+    ) {
+      prefijo = linea;
+    }
+    sinMatch++;
+    if (criterios.length > 0 && sinMatch >= 6) break;
+  }
+
+  if (criterios.length === 0) return null;
+  const puntajeTotal =
+    Math.round(criterios.reduce((s, c) => s + c.puntaje, 0) * 100) / 100;
+  return { criterios, puntajeTotal };
+}
+
 /**
  * Desempata entre tablas candidatas YA validadas (suman ~100, ver buscarMejorTabla).
  * Prefiere la que tiene más criterios y la que trae los puntajes en la columna del
@@ -415,6 +519,18 @@ function buscarMejorTabla(lineas) {
   for (const { pos, derecho } of finalistas) {
     const resultado = extraerCriteriosDeBloque(lineas, pos);
     if (resultado) evaluados.push({ resultado, derecho });
+  }
+
+  // Filtro extra: "cuadros de puntaje". Toda fila de encabezado que diga PUNTAJE
+  // abre un cuadro; lo leemos con el lector tolerante a cortes de página. Pueden
+  // existir varios cuadros y el formato variar; cada uno entra como candidato.
+  const vistosPuntaje = new Set();
+  for (let i = 0; i < lineas.length; i++) {
+    if (!ENCABEZADOS_PUNTAJE.some((re) => re.test(lineas[i]))) continue;
+    if ([...vistosPuntaje].some((p) => Math.abs(p - i) <= 3)) continue;
+    vistosPuntaje.add(i);
+    const resultado = extraerCuadroPuntaje(lineas, i);
+    if (resultado) evaluados.push({ resultado, derecho: true });
   }
 
   // Filtro principal: la tabla de criterios correcta SIEMPRE suma 100 puntos.
