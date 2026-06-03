@@ -221,6 +221,7 @@ const REGEX_FILA_TABLA_PUNTAJE = /^.{4,}\s+(\d{1,4}(?:[.,]\d{1,3})?)\s*(?:puntos
 
 function limpiarNombreCriterio(nombre) {
   return nombre
+    .replace(/^#{1,6}\s*/, "") // marcador markdown de una fila en mayúsculas ("## FACTOR …")
     .replace(/\.{2,}/g, "")
     .replace(/_+/g, " ")
     .replace(/^\s*\d+(\.\d+)*\s*[-.)]?\s*/, "")
@@ -233,6 +234,39 @@ function parsearNumero(s) {
   const limpio = String(s).replace(/[^\d.,]/g, "").replace(/\.(?=\d{3}(\D|$))/g, "");
   const conPunto = limpio.replace(",", ".");
   return Number(conPunto);
+}
+
+// Quita el marcador markdown de encabezado ("## ", "### "…) para evaluar la línea
+// como una posible fila de datos. pdfAMarkdown convierte toda línea EN MAYÚSCULAS
+// en un encabezado `## …`; muchas tablas de puntaje vienen así ("## PROPUESTA
+// ECONÓMICA 185"), y sin este destape se descartarían como simples encabezados.
+function sinMarcadorMd(linea) {
+  return linea.replace(/^#{1,6}\s+/, "");
+}
+
+// Remanente de encabezado de tabla: una línea compuesta ÚNICAMENTE por palabras de
+// cabecera ("Concepto", "Factor", "Puntaje", "máximo", "Concepto Puntaje máximo"…).
+// Importante: NO debe atrapar nombres reales que empiezan por una de esas palabras
+// ("Factor de sostenibilidad técnico"), por eso exige que TODA la línea sean
+// palabras de cabecera, no solo la primera.
+function esRemanenteEncabezado(t) {
+  return /^((concepto|factor|criterio|descripci[oó]n|[ií]tem|item|puntajes?|m[áa]xim[oa]|de|del|y)\s*)+$/i.test(
+    t.trim(),
+  );
+}
+
+// ¿La línea (en texto plano, sin marcador) sirve como continuación del nombre de
+// una fila partida en dos? ("Vinculación de personas con" → "discapacidad 1").
+// Exige letras, que no empiece por dígito, longitud razonable y que NO contenga un
+// sub-puntaje entre paréntesis ("(155 PUNTOS)") ni sea un remanente de encabezado.
+function esFragmentoNombre(texto) {
+  const t = texto.trim();
+  if (t.length < 2 || t.length > 80) return false;
+  if (!/[A-Za-zÁÉÍÓÚÑáéíóúñ]/.test(t)) return false;
+  if (/^[\d.,]/.test(t)) return false;
+  if (/\(\s*\d/.test(t)) return false; // sub-puntaje entre paréntesis → no es nombre
+  if (esRemanenteEncabezado(t)) return false;
+  return true;
 }
 
 /**
@@ -397,12 +431,27 @@ function extraerCuadroPuntaje(lineas, inicio) {
   const vistos = new Set();
   let prefijo = ""; // primera parte de una fila partida en dos líneas
   let sinMatch = 0;
+  let modoMayusculas = false; // ¿la última fila capturada vino de una fila "## …"?
 
   for (let i = inicio + 1; i < fin; i++) {
-    const linea = lineas[i].trim();
-    if (esRuidoDePagina(linea)) continue; // saltar cortes de página
-    if (esEncabezadoSeccionNumerada(linea)) break; // nueva sección → fin del cuadro
-    if (REGEX_TOTAL_CUADRO.test(linea)) break; // "Total 1000 puntos" → cierra el cuadro
+    const original = lineas[i].trim();
+    if (esEncabezadoSeccionNumerada(original)) break; // "## 4.1 …" nueva sección → fin
+    if (REGEX_TOTAL_CUADRO.test(original)) break; // "Total 1000 puntos" → cierra el cuadro
+    if (esRuidoDePagina(original)) {
+      prefijo = ""; // un corte de página rompe la continuación de un nombre partido
+      continue;
+    }
+
+    // Destapamos un eventual marcador "## " para leer filas en mayúsculas como
+    // datos ("## PROPUESTA ECONÓMICA 185"). Si la fila ERA un encabezado markdown
+    // NO puede actuar como fragmento de nombre (evita que "## DOCUMENTO BASE" o
+    // "## CALIDAD" se peguen al siguiente criterio): los nombres partidos legítimos
+    // de los pliegos tipo siempre vienen en texto plano (tienen minúsculas).
+    const esHeader = /^#{1,6}\s+/.test(original);
+    const linea = sinMarcadorMd(original);
+    // La fila "Total" puede venir en mayúsculas → "## TOTAL: 100 PUNTOS"; hay que
+    // detectarla SIN el marcador, o se capturaría como un criterio falso de 100.
+    if (REGEX_TOTAL_CUADRO.test(linea)) break;
 
     const m = linea.match(/^(.+?)\s+(\d{1,4}(?:[.,]\d{1,3})?)\s*(puntos?|pts|%)?\.?\s*$/i);
     if (m) {
@@ -413,7 +462,7 @@ function extraerCuadroPuntaje(lineas, inicio) {
       const valido =
         nombre &&
         nombre.length >= 3 &&
-        nombre.length <= 160 &&
+        nombre.length <= 200 &&
         letras >= 3 &&
         /^[A-Za-zÁÉÍÓÚÑáéíóúñ(]/.test(nombre) &&
         !NOMBRES_EXCLUIDOS.has(nombre.toLowerCase()) &&
@@ -427,19 +476,22 @@ function extraerCuadroPuntaje(lineas, inicio) {
           puntaje: Math.round(puntaje * 100) / 100,
           unidad: (m[3] || "").includes("%") ? "%" : "puntos",
         });
+        modoMayusculas = esHeader;
         sinMatch = 0;
         continue;
       }
+      // Matcheó número pero el nombre no es válido: no rompe el prefijo acumulado.
     }
 
-    // Texto sin número: puede ser la primera parte de una fila partida en dos.
-    // Ignoramos remanentes de encabezado ("máximo", "puntaje", "factor", …).
-    if (
-      /[A-Za-zÁÉÍÓÚÑáéíóúñ]/.test(linea) &&
-      !/^#{1,6}\s/.test(linea) &&
-      !/^(puntaje|m[áa]xim[oa]|factor|concepto|descripci[oó]n|criterio|item|[ií]tem)\b/i.test(linea)
-    ) {
-      prefijo = linea;
+    // Texto sin número: puede ser la primera parte de una fila partida en dos
+    // ("Vinculación de personas con" → "discapacidad 1"). Las líneas en texto plano
+    // siempre son candidatas; las líneas "## …" solo cuando ya venimos leyendo una
+    // tabla EN MAYÚSCULAS (así "## PUNTAJE ADICIONAL… TRABAJADORES" + "## CON
+    // DISCAPACIDAD 1" se unen, pero "## DOCUMENTO BASE" en un pliego tipo no).
+    if ((!esHeader || modoMayusculas) && esFragmentoNombre(linea)) {
+      prefijo = linea.trim();
+    } else {
+      prefijo = ""; // encabezado de página o ruido → no arrastrar nombre
     }
     sinMatch++;
     if (criterios.length > 0 && sinMatch >= 6) break;
@@ -458,8 +510,17 @@ function extraerCuadroPuntaje(lineas, inicio) {
  */
 function scoreCandidato(resultado, puntajeDerecho = false) {
   if (!resultado || resultado.criterios.length === 0) return -Infinity;
-  let score = resultado.criterios.length * 2; // más criterios = mejor
-  if (puntajeDerecho) score += 40; // puntajes en la columna del extremo derecho
+  let score = resultado.criterios.length * 100; // más criterios = mejor
+  if (puntajeDerecho) score += 5000; // puntajes en la columna del extremo derecho
+  // Calidad de reconstrucción de nombres: cuando dos tablas suman lo mismo y tienen
+  // el mismo número de criterios, preferimos la de nombres completos. Un nombre que
+  // empieza en minúscula es señal de fila partida mal unida ("discapacidad",
+  // "mujeres", "nacional", "agregado"); se penaliza. Los nombres más largos (mejor
+  // reconstruidos) reciben un pequeño premio.
+  for (const c of resultado.criterios) {
+    if (/^[a-záéíóúñ]/.test(c.nombre)) score -= 60; // fragmento de fila partida
+    score += Math.min(c.nombre.length, 60) * 0.2;
+  }
   return score;
 }
 
@@ -533,18 +594,55 @@ function buscarMejorTabla(lineas) {
     if (resultado) evaluados.push({ resultado, derecho: true });
   }
 
-  // Filtro principal: la tabla de criterios correcta SIEMPRE suma 100 puntos.
-  // Solo aceptamos candidatas cuyo total sea 100 (±1 por redondeo). Como último
-  // recurso admitimos la escala de 1000 (±10) que usan algunos pliegos. Si
-  // ninguna candidata cuadra con un total esperado, no hay tabla confiable.
+  // Filtro principal por escala: la tabla de criterios correcta de un pliego tipo
+  // SIEMPRE suma 100 puntos; algunos pliegos usan la escala de 1000.
   const cerca = (objetivo, tol) =>
     evaluados.filter(
       (e) => Math.abs(e.resultado.puntajeTotal - objetivo) <= tol,
     );
-  const elegibles = cerca(100, 1).length ? cerca(100, 1) : cerca(1000, 10);
+
+  // Nivel 1 (alta confianza): el total cuadra exactamente con la escala esperada.
+  let elegibles = cerca(100, 1);
+  let escala = 100;
+  let sumaConfiable = true;
+  if (!elegibles.length) {
+    const mil = cerca(1000, 10);
+    if (mil.length) {
+      elegibles = mil;
+      escala = 1000;
+    }
+  }
+
+  // Nivel 2 (baja confianza): no hay total exacto, pero existe una tabla "casi
+  // completa" (≥4 criterios, puntajes en la columna derecha) cuyo total queda
+  // cerca de 100 ó 1000. En vez de descartar TODO —y mostrar "no se identificó
+  // sección"— devolvemos la mejor aproximación marcada como no confiable, para
+  // que el usuario sepa que puede faltar/sobrar un criterio y lo verifique.
+  if (!elegibles.length) {
+    const casi = (objetivo, tol) =>
+      evaluados.filter(
+        (e) =>
+          e.derecho &&
+          e.resultado.criterios.length >= 4 &&
+          Math.abs(e.resultado.puntajeTotal - objetivo) <= tol,
+      );
+    const casi100 = casi(100, 12);
+    const casi1000 = casi(1000, 80);
+    if (casi100.length) {
+      elegibles = casi100;
+      escala = 100;
+      sumaConfiable = false;
+    } else if (casi1000.length) {
+      elegibles = casi1000;
+      escala = 1000;
+      sumaConfiable = false;
+    }
+  }
+
   if (!elegibles.length) return null;
 
-  // Entre las válidas, la mejor: más criterios y puntajes en la columna derecha.
+  // Entre las válidas, la mejor: más criterios, puntajes en la columna derecha y
+  // nombres mejor reconstruidos (ver scoreCandidato).
   let mejor = null;
   let mejorScore = -Infinity;
   for (const { resultado, derecho } of elegibles) {
@@ -555,7 +653,7 @@ function buscarMejorTabla(lineas) {
     }
   }
 
-  return mejor;
+  return { ...mejor, sumaConfiable, escala };
 }
 
 export function extraerCriterios(md) {
@@ -565,7 +663,8 @@ export function extraerCriterios(md) {
 
   const lineas = md.split(/\r?\n/);
   const resultado = buscarMejorTabla(lineas);
-  if (!resultado) return { criterios: [], puntajeTotal: 0 };
+  if (!resultado)
+    return { criterios: [], puntajeTotal: 0, sumaConfiable: false, escala: null };
 
   // Los puntajes se devuelven tal como aparecen en el pliego (sin reescalar).
   return resultado;
@@ -619,10 +718,17 @@ export async function analizarPliego(idPortafolio) {
     );
   }
 
-  const { criterios, puntajeTotal } = extraerCriterios(md);
+  const { criterios, puntajeTotal, sumaConfiable, escala } = extraerCriterios(md);
   if (criterios.length === 0 && md.trim().length >= 500) {
     advertencias.push(
       "No se identificó sección de criterios de evaluación en el pliego.",
+    );
+  }
+  if (criterios.length > 0 && sumaConfiable === false) {
+    advertencias.push(
+      `Los criterios identificados suman ${puntajeTotal} y no el total esperado (${escala || 100}). ` +
+        "Es posible que falte o sobre un criterio, o que el pliego use otra distribución; " +
+        "verifique el cuadro de puntajes directamente en el documento.",
     );
   }
 
@@ -633,6 +739,8 @@ export async function analizarPliego(idPortafolio) {
     markdown_cacheado: cacheado,
     criterios,
     puntaje_total: puntajeTotal,
+    suma_confiable: criterios.length > 0 ? sumaConfiable !== false : null,
+    escala_puntaje: criterios.length > 0 ? escala || 100 : null,
     advertencias,
     analizado_en: new Date().toISOString(),
   };

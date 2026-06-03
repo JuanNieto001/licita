@@ -462,11 +462,35 @@ export default function DetailModal({ licitacion, onClose }) {
                             </tr>
                           ))}
                           {analisis.puntaje_total > 0 && (
-                            <tr className="bg-slate-50 dark:bg-slate-800/50">
-                              <td className="p-3 font-semibold text-slate-800 dark:text-slate-100">
+                            <tr
+                              className={
+                                analisis.suma_confiable === false
+                                  ? "bg-amber-50 dark:bg-amber-500/10"
+                                  : "bg-slate-50 dark:bg-slate-800/50"
+                              }
+                            >
+                              <td
+                                className={`p-3 font-semibold ${
+                                  analisis.suma_confiable === false
+                                    ? "text-amber-800 dark:text-amber-300"
+                                    : "text-slate-800 dark:text-slate-100"
+                                }`}
+                              >
                                 Total
+                                {analisis.suma_confiable === false && (
+                                  <span className="ml-1.5 font-normal text-xs">
+                                    (no suma {analisis.escala_puntaje || 100} —
+                                    verificar en el pliego)
+                                  </span>
+                                )}
                               </td>
-                              <td className="p-3 text-right font-semibold tabular-nums">
+                              <td
+                                className={`p-3 text-right font-semibold tabular-nums ${
+                                  analisis.suma_confiable === false
+                                    ? "text-amber-800 dark:text-amber-300"
+                                    : ""
+                                }`}
+                              >
                                 {analisis.puntaje_total}
                               </td>
                             </tr>

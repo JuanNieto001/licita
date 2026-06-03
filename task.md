@@ -46,3 +46,36 @@
   2. Corte del bloque: parar al ver "Total NN", otro `##`, o 4 líneas consecutivas sin match (filtra falsos positivos del párrafo siguiente).
 - Soporte para decimales con coma (`39,75` → 39.75) y unidades `puntos|pts|%`.
 - jsPDF v3.x importa `canvg` / `html2canvas` / `dompurify` dinámicamente — solo se usan para SVG/HTML, no para texto. Vite no resuelve esos imports dinámicos, así que los aliasé a `frontend/src/empty-module.js` en `vite.config.js`.
+
+## Robustez del encuentro y suma de puntajes (hardening)
+
+Revisión de inconsistencias sobre 25 pliegos cacheados + 2 pliegos reales del repo
+(LP-005, LP-012). Cambios en `backend/src/pdfAnalyzer.js`:
+
+1. **Nombres mutilados por filas partidas (defecto dominante).** `pdfAMarkdown`
+   parte un criterio en dos líneas ("Vinculación de personas con" / "discapacidad 1").
+   El extractor de bloque no reunía el prefijo y devolvía "discapacidad", "nacional",
+   "empresas de mujeres", "ambiental agregado"… El mismo pliego salía limpio o sucio
+   según qué ruta ganara (p.ej. `755689780` vs `755689900`, idénticos). Solución:
+   - `extraerCuadroPuntaje` reconstruye el prefijo desde líneas de texto plano y,
+     en tablas EN MAYÚSCULAS, también desde filas `## …` (solo en "modo mayúsculas",
+     para no pegar encabezados de página tipo `## DOCUMENTO BASE`).
+   - `scoreCandidato` penaliza nombres que empiezan en minúscula (fragmento) y premia
+     nombres completos, así la candidata mejor reconstruida gana los empates.
+2. **Tablas EN MAYÚSCULAS rechazadas.** Una tabla "## PROPUESTA ECONÓMICA 185 …
+   ## TOTAL 1000 PUNTOS" se convertía toda en encabezados markdown y se descartaba.
+   Ahora se destapa el marcador `##` para leer la fila como dato, y el cierre "Total"
+   se detecta también sin marcador. Recupera `65972463` (→1000) y `726985405` (→100).
+3. **Compuerta todo-o-nada → niveles de confianza.** Antes, si la tabla no sumaba
+   exactamente 100/1000 se descartaba TODO ("no se identificó sección"). Ahora:
+   - Nivel 1 (alta confianza): total == 100 (±1) o == 1000 (±10).
+   - Nivel 2 (baja confianza): la mejor tabla "casi completa" (≥4 criterios, puntajes
+     en la columna derecha) cerca de 100/1000 se devuelve marcada `suma_confiable:false`
+     con una advertencia, en vez de descartarse. Una fila perdida ya no anula todo.
+   - El análisis expone `suma_confiable` y `escala_puntaje`; el frontend pinta la fila
+     Total en ámbar con "(no suma N — verificar)" cuando la suma no es confiable.
+
+Resultado: 2 pliegos recuperados (0→correcto), ~9 con nombres ahora completos,
+0 regresiones (todos los que sumaban 100/1000 siguen igual con nombres iguales o
+mejores). Los que siguen en 0 son escaneados sin texto, sin cuadro-resumen real, o
+tablas jerárquicas con subtotal de grupo (no se inventan datos).
