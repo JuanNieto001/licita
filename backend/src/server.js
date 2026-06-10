@@ -180,6 +180,14 @@ app.get(
       orden,
     });
     db.upsertManyLicitaciones(result.items);
+    // Si el usuario fijó la hora exacta de cierre (la de la página de SECOP),
+    // reemplaza la fecha truncada a medianoche que traen los datos abiertos.
+    result.items = result.items.map((it) => {
+      const exacto = db.getCierreExacto(it.id_del_portafolio);
+      return exacto
+        ? { ...it, cierre_epoch_ms: exacto, cierre_exacto: true }
+        : { ...it, cierre_exacto: false };
+    });
     res.json(result);
   }),
 );
@@ -190,7 +198,32 @@ app.get(
     const lic = await getLicitacion(req.params.idPortafolio);
     if (!lic) return res.status(404).json({ error: "Licitación no encontrada" });
     db.upsertLicitacion(lic);
-    res.json(lic);
+    const exacto = db.getCierreExacto(lic.id_del_portafolio);
+    res.json(
+      exacto
+        ? { ...lic, cierre_epoch_ms: exacto, cierre_exacto: true }
+        : { ...lic, cierre_exacto: false },
+    );
+  }),
+);
+
+app.put(
+  "/api/licitaciones/:idPortafolio/cierre-exacto",
+  asyncHandler(async (req, res) => {
+    const ms = Number(req.body?.cierre_ms);
+    if (!Number.isFinite(ms) || ms <= 0) {
+      return res.status(400).json({ error: "cierre_ms inválido" });
+    }
+    db.setCierreExacto(req.params.idPortafolio, ms);
+    res.json({ ok: true, cierre_epoch_ms: ms, cierre_exacto: true });
+  }),
+);
+
+app.delete(
+  "/api/licitaciones/:idPortafolio/cierre-exacto",
+  asyncHandler(async (req, res) => {
+    db.setCierreExacto(req.params.idPortafolio, null);
+    res.json({ ok: true });
   }),
 );
 

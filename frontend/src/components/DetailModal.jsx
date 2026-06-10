@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import jsPDF from "jspdf";
 import { I } from "./Icons.jsx";
+import Countdown from "./Countdown.jsx";
 import {
   fetchDocumentos,
   fetchAnalisisPliego,
   urlDescargaDocumento,
   urlDescargaZip,
+  putCierreExacto,
 } from "../api.js";
 import {
   formatCOP,
@@ -23,8 +25,36 @@ export default function DetailModal({ licitacion, onClose }) {
   const [analisis, setAnalisis] = useState(null);
   const [analisisErr, setAnalisisErr] = useState(null);
   const [analizando, setAnalizando] = useState(false);
+  const [cierreMs, setCierreMs] = useState(licitacion.cierre_epoch_ms || null);
+  const [cierreExacto, setCierreExacto] = useState(!!licitacion.cierre_exacto);
+  const [editandoHora, setEditandoHora] = useState(false);
+  const [horaCierre, setHoraCierre] = useState("");
 
   const id = licitacion.id_del_portafolio;
+
+  useEffect(() => {
+    setCierreMs(licitacion.cierre_epoch_ms || null);
+    setCierreExacto(!!licitacion.cierre_exacto);
+    setEditandoHora(false);
+    setHoraCierre("");
+  }, [id, licitacion.cierre_epoch_ms, licitacion.cierre_exacto]);
+
+  async function guardarHoraCierre() {
+    if (!horaCierre || !cierreMs) return;
+    const [hh, mm] = horaCierre.split(":").map(Number);
+    // El día de cierre viene de los datos abiertos; la hora la aporta el
+    // usuario tal como aparece en el contador de la página de SECOP.
+    const d = new Date(cierreMs);
+    d.setHours(hh, mm, 0, 0);
+    try {
+      await putCierreExacto(id, d.getTime());
+      setCierreMs(d.getTime());
+      setCierreExacto(true);
+      setEditandoHora(false);
+    } catch (e) {
+      alert(`No se pudo guardar la hora de cierre: ${e.message}`);
+    }
+  }
 
   useEffect(() => {
     let alive = true;
@@ -181,9 +211,44 @@ export default function DetailModal({ licitacion, onClose }) {
       >
         <div className="flex items-start gap-3 p-5 border-b border-slate-200 dark:border-slate-800">
           <div className="flex-1 min-w-0">
-            <span className={`badge ${badgeClasses(color)}`}>
-              {licitacion.estado_del_procedimiento || "Sin estado"}
-            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={`badge ${badgeClasses(color)}`}>
+                {licitacion.estado_del_procedimiento || "Sin estado"}
+              </span>
+              {cierreMs && <Countdown hastaMs={cierreMs} exacto={cierreExacto} />}
+              {cierreMs && !editandoHora && (
+                <button
+                  onClick={() => setEditandoHora(true)}
+                  className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+                  title="Copia la hora del contador de la página de SECOP para que el conteo coincida al segundo"
+                >
+                  {cierreExacto ? "Cambiar hora" : "Fijar hora exacta de SECOP"}
+                </button>
+              )}
+              {editandoHora && (
+                <span className="inline-flex items-center gap-1.5">
+                  <input
+                    type="time"
+                    value={horaCierre}
+                    onChange={(e) => setHoraCierre(e.target.value)}
+                    className="text-xs rounded-md border border-slate-300 dark:border-slate-700 bg-transparent px-1.5 py-1 text-slate-800 dark:text-slate-200"
+                  />
+                  <button
+                    onClick={guardarHoraCierre}
+                    disabled={!horaCierre}
+                    className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
+                  >
+                    Guardar
+                  </button>
+                  <button
+                    onClick={() => setEditandoHora(false)}
+                    className="text-xs text-slate-500 hover:underline"
+                  >
+                    Cancelar
+                  </button>
+                </span>
+              )}
+            </div>
             {licitacion.referencia_del_proceso && (
               <div className="mt-2 text-base font-bold text-indigo-600 dark:text-indigo-400 tracking-wide">
                 {licitacion.referencia_del_proceso}
@@ -242,6 +307,12 @@ export default function DetailModal({ licitacion, onClose }) {
             </Info>
             <Info label="Última publicación" icon={<I.Calendar className="w-4 h-4" />}>
               {formatDate(licitacion.fecha_de_ultima_publicaci)}
+            </Info>
+            <Info
+              label="Cierre (recepción de ofertas)"
+              icon={<I.Clock className="w-4 h-4" />}
+            >
+              {formatDate(licitacion.fecha_de_recepcion_de)}
             </Info>
           </div>
 

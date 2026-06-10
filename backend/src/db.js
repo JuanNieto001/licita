@@ -195,6 +195,25 @@ export function getAllIds() {
   return Object.keys(data);
 }
 
+// Hora exacta de cierre fijada por el usuario (los datos abiertos solo traen
+// el día; la hora está únicamente en la página de SECOP, tras captcha).
+export function setCierreExacto(id, ms) {
+  if (!id) return null;
+  const prev = data[id] || { id };
+  data[id] = {
+    ...prev,
+    cierre_exacto_ms: ms,
+    actualizado_en: new Date().toISOString(),
+  };
+  scheduleWrite();
+  return data[id];
+}
+
+export function getCierreExacto(id) {
+  const v = data[id]?.cierre_exacto_ms;
+  return Number.isFinite(v) ? v : null;
+}
+
 const ANALISIS_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 // Subir cuando cambie el algoritmo de extracción: invalida análisis viejos.
 const ANALISIS_VERSION = 4;

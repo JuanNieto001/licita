@@ -37,6 +37,14 @@ export function fetchFacets() {
   return jsonFetch(`/facets`);
 }
 
+export function putCierreExacto(id, cierreMs) {
+  return jsonFetch(`/licitaciones/${encodeURIComponent(id)}/cierre-exacto`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cierre_ms: cierreMs }),
+  });
+}
+
 export function urlDescargaDocumento(id) {
   return `${BASE}/documentos/${encodeURIComponent(id)}/descargar`;
 }

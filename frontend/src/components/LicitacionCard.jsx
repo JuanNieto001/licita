@@ -1,4 +1,5 @@
 import { I } from "./Icons.jsx";
+import Countdown from "./Countdown.jsx";
 import {
   formatCOP,
   formatDate,
@@ -33,6 +34,14 @@ export default function LicitacionCard({ item, onClick }) {
             {item.fase}
           </div>
         )}
+
+      {item.cierre_epoch_ms && (
+        <Countdown
+          hastaMs={item.cierre_epoch_ms}
+          exacto={item.cierre_exacto}
+          className="w-full mb-3"
+        />
+      )}
 
       {item.referencia_del_proceso && (
         <div className="text-sm font-bold text-indigo-600 dark:text-indigo-400 mb-1 tracking-wide">

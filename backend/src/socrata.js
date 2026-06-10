@@ -161,6 +161,13 @@ export function plazoVencido(lic) {
   return fin.getTime() <= Date.now();
 }
 
+// Fecha de cierre normalizada (epoch ms) para que el frontend pueda mostrar
+// la cuenta regresiva en tiempo real sin lidiar con los formatos de SECOP.
+export function fechaCierreMs(lic) {
+  const fin = parseFechaSecop(lic?.fecha_de_recepcion_de);
+  return fin ? fin.getTime() : null;
+}
+
 async function getProcesosConDocs(procesoIds) {
   if (!procesoIds.length) return new Set();
   const cacheKey = `docsexists:${procesoIds.slice().sort().join(",")}`;
@@ -288,7 +295,9 @@ export async function listLicitaciones({
   const total = batchFiltered.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const startIdx = (page - 1) * pageSize;
-  const items = batchFiltered.slice(startIdx, startIdx + pageSize);
+  const items = batchFiltered
+    .slice(startIdx, startIdx + pageSize)
+    .map((it) => ({ ...it, cierre_epoch_ms: fechaCierreMs(it) }));
 
   return {
     items,
@@ -305,7 +314,8 @@ export async function getLicitacion(idPortafolio) {
     $where: `id_del_portafolio='${escapeSoql(idPortafolio)}'`,
     $limit: 1,
   });
-  return res?.[0] || null;
+  const lic = res?.[0] || null;
+  return lic ? { ...lic, cierre_epoch_ms: fechaCierreMs(lic) } : null;
 }
 
 export async function getDocumentosPorProceso(idPortafolio) {
