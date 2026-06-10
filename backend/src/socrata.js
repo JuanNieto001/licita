@@ -27,14 +27,16 @@ const INGENIERIA_CIVIL_WHERE =
   ")";
 
 // Procesos actualmente abiertos y recibiendo ofertas: estado Publicado + fase activa.
+// NO se incluyen las fases de borrador ('Presentación de observaciones',
+// 'Selección de ofertas (borrador)'): en ellas no se pueden presentar ofertas y,
+// cuando su plazo de observaciones vence (contador en cero en la página de SECOP),
+// no hay forma de saberlo por los datos abiertos — el cronograma no está publicado.
 const OPEN_PROCESS_WHERE =
   "estado_del_procedimiento='Publicado' " +
   "AND fase in(" +
   "'Presentación de oferta'," +
   "'Fase de ofertas'," +
-  "'Presentación de observaciones'," +
   "'Manifestación de interés (Menor Cuantía)'," +
-  "'Selección de ofertas (borrador)'," +
   "'Fase de Selección (Presentación de ofertas)'" +
   ")";
 
@@ -122,6 +124,41 @@ async function socrataGet(url, params = {}, { maxIntentos = 3 } = {}) {
 
 function escapeSoql(value) {
   return String(value).replace(/'/g, "''");
+}
+
+// Fechas de SECOP en texto: "16/06/2026 12:00:00 a. m." (hora de Colombia, UTC-5)
+function parseFechaSecop(s) {
+  if (!s) return null;
+  const m = String(s)
+    .trim()
+    .match(
+      /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?)?/i,
+    );
+  if (!m) {
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const [, dd, MM, yyyy, hh, mm, ss, ap] = m;
+  let h = Number(hh || 0);
+  if (ap) {
+    const esPm = ap.toLowerCase() === "p";
+    if (esPm && h !== 12) h += 12;
+    if (!esPm && h === 12) h = 0;
+  }
+  return new Date(
+    Date.UTC(Number(yyyy), Number(MM) - 1, Number(dd), h + 5, Number(mm || 0), Number(ss || 0)),
+  );
+}
+
+/**
+ * El contador de la página oficial de SECOP (div#ctdCountdown) cuenta hacia la
+ * fecha de recepción de ofertas. Si esa fecha ya pasó, el contador está en cero
+ * y ya no se puede participar en el proceso.
+ */
+export function plazoVencido(lic) {
+  const fin = parseFechaSecop(lic?.fecha_de_recepcion_de);
+  if (!fin) return false; // sin fecha no se puede saber → no excluir
+  return fin.getTime() <= Date.now();
 }
 
 async function getProcesosConDocs(procesoIds) {
@@ -226,9 +263,13 @@ export async function listLicitaciones({
     }
   }
 
+  // 1b. Excluir procesos cuyo plazo de recepción de ofertas ya venció
+  //     (contador en cero en la página de SECOP → ya no se puede participar).
+  const vigentes = uniqueCandidates.filter((c) => !plazoVencido(c));
+
   // 2. Cruce batch PARALELO con datasets de documentos
   //    Chunks se procesan todos a la vez en lugar de secuencialmente.
-  const uniqueIds = uniqueCandidates.map((c) => c.id_del_portafolio);
+  const uniqueIds = vigentes.map((c) => c.id_del_portafolio);
   const CHUNK = 150;
   const chunks = [];
   for (let i = 0; i < uniqueIds.length; i += CHUNK) {
@@ -242,7 +283,7 @@ export async function listLicitaciones({
     for (const p of found) conDocs.add(p);
   }
 
-  const batchFiltered = uniqueCandidates.filter((c) => conDocs.has(c.id_del_portafolio));
+  const batchFiltered = vigentes.filter((c) => conDocs.has(c.id_del_portafolio));
 
   const total = batchFiltered.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));

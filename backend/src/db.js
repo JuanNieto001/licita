@@ -196,10 +196,13 @@ export function getAllIds() {
 }
 
 const ANALISIS_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+// Subir cuando cambie el algoritmo de extracción: invalida análisis viejos.
+const ANALISIS_VERSION = 4;
 
 export function getAnalisisPliego(id) {
   const item = data[id];
   if (!item?.analisis_pliego) return null;
+  if (item.analisis_pliego.version !== ANALISIS_VERSION) return null;
   const ts = item.analisis_pliego.analizado_en;
   if (!ts) return item.analisis_pliego;
   const age = Date.now() - new Date(ts).getTime();
@@ -212,7 +215,7 @@ export function setAnalisisPliego(id, analisis) {
   const prev = data[id] || { id };
   data[id] = {
     ...prev,
-    analisis_pliego: analisis,
+    analisis_pliego: { ...analisis, version: ANALISIS_VERSION },
     actualizado_en: new Date().toISOString(),
   };
   scheduleWrite();

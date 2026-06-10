@@ -210,7 +210,11 @@ app.get(
     const refresh = req.query.refresh === "1" || req.query.refresh === "true";
     if (!refresh) {
       const cached = db.getAnalisisPliego(id);
-      if (cached) return res.json({ ...cached, desde_cache: true });
+      // Solo reutilizar análisis exitosos: los fallidos (sin documento
+      // identificado) se reintentan, p.ej. tras mejorar las palabras clave.
+      if (cached?.documento_analizado) {
+        return res.json({ ...cached, desde_cache: true });
+      }
     }
 
     const analisis = await analizarPliego(id);

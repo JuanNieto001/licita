@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PDFParse } from "pdf-parse";
+import { createWorker } from "tesseract.js";
 import { getDocumentosPorProceso } from "./socrata.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -23,16 +24,30 @@ function nombreNormalizado(d) {
   return (d?.nombre_archivo || "").toLowerCase();
 }
 
+export function esPdf(d) {
+  const ext = (d?.extensi_n || "").toLowerCase().replace(/^\./, "");
+  return ext === "pdf" || nombreNormalizado(d).endsWith(".pdf");
+}
+
 export function elegirPliego(docs) {
   if (!Array.isArray(docs) || docs.length === 0) return null;
-  const pdfs = docs.filter((d) => (d?.extensi_n || "").toLowerCase() === "pdf");
+  const pdfs = docs.filter(esPdf);
   if (!pdfs.length) return null;
 
   const score = (d) => {
     const n = nombreNormalizado(d);
+    // Variante con separadores (_ - .) como espacios, para nombres tipo
+    // "documento_base.pdf" o "doc-base-definitivo.pdf".
+    const ns = n.replace(/[_\-.]+/g, " ").replace(/\s+/g, " ");
     let s = 0;
     // Palabras clave positivas — nombre completo y abreviaciones
     if (n.includes("pliego") || n.includes("plieg")) s += 12;
+    // "Documento base" — nombre alternativo del pliego de condiciones en SECOP II
+    if (ns.includes("documento base") || n.includes("documentobase")) s += 12;
+    if (ns.includes("doc base") || ns.includes("docbase")) s += 10;
+    // "base" junto a otras señales del pliego ("pliego base", "base definitivo")
+    if (ns.includes("base") && (n.includes("plieg") || n.includes("definit")))
+      s += 4;
     if (n.includes("condiciones")) s += 6;
     if (n.includes("condic") && !n.includes("condiciones")) s += 4;
     if (n.includes("definitivo")) s += 10;
@@ -80,26 +95,7 @@ function lineaEsMayusculas(linea) {
   return letras === letras.toUpperCase();
 }
 
-export async function pdfAMarkdown(buffer) {
-  const parser = new PDFParse({ data: new Uint8Array(buffer) });
-  let text = "";
-  let numpages = 0;
-  let titulo = "Pliego de condiciones";
-  try {
-    const textResult = await parser.getText();
-    text = textResult?.text || "";
-    numpages = textResult?.total || textResult?.pages?.length || 0;
-    try {
-      const infoResult = await parser.getInfo();
-      const t = infoResult?.info?.Title;
-      if (t && typeof t === "string" && t.trim()) titulo = t.trim();
-    } catch {}
-  } finally {
-    try {
-      await parser.destroy();
-    } catch {}
-  }
-
+export function textoAMarkdown(text, titulo = "Pliego de condiciones", numpages = 0) {
   const lineas = text.split(/\r?\n/);
   const out = [];
   out.push(`# ${titulo}`);
@@ -127,12 +123,35 @@ export async function pdfAMarkdown(buffer) {
   return out.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
-async function obtenerMarkdownPliego(doc) {
-  fs.mkdirSync(PLIEGOS_DIR, { recursive: true });
-  const mdPath = path.join(PLIEGOS_DIR, `${doc.id}.md`);
+export async function pdfAMarkdown(buffer) {
+  const parser = new PDFParse({ data: new Uint8Array(buffer) });
+  let text = "";
+  let numpages = 0;
+  let titulo = "Pliego de condiciones";
+  try {
+    const textResult = await parser.getText();
+    text = textResult?.text || "";
+    numpages = textResult?.total || textResult?.pages?.length || 0;
+    try {
+      const infoResult = await parser.getInfo();
+      const t = infoResult?.info?.Title;
+      if (t && typeof t === "string" && t.trim()) titulo = t.trim();
+    } catch {}
+  } finally {
+    try {
+      await parser.destroy();
+    } catch {}
+  }
 
-  if (fs.existsSync(mdPath)) {
-    return { md: fs.readFileSync(mdPath, "utf8"), cacheado: true, mdPath };
+  return textoAMarkdown(text, titulo, numpages);
+}
+
+// Descarga el PDF del pliego (con caché en disco) y devuelve su buffer.
+async function obtenerPdfPliego(doc) {
+  fs.mkdirSync(PLIEGOS_DIR, { recursive: true });
+  const pdfPath = path.join(PLIEGOS_DIR, `${doc.id}.pdf`);
+  if (fs.existsSync(pdfPath)) {
+    return { buffer: fs.readFileSync(pdfPath), cacheado: true };
   }
 
   if (!_downloader) {
@@ -148,10 +167,213 @@ async function obtenerMarkdownPliego(doc) {
   const chunks = [];
   for await (const c of upstream.body) chunks.push(c);
   const buffer = Buffer.concat(chunks);
+  fs.writeFileSync(pdfPath, buffer);
+  return { buffer, cacheado: false };
+}
 
+async function obtenerMarkdownPliego(doc, buffer) {
+  fs.mkdirSync(PLIEGOS_DIR, { recursive: true });
+  const mdPath = path.join(PLIEGOS_DIR, `${doc.id}.md`);
+  if (fs.existsSync(mdPath)) {
+    return { md: fs.readFileSync(mdPath, "utf8"), cacheado: true };
+  }
   const md = await pdfAMarkdown(buffer);
   fs.writeFileSync(mdPath, md, "utf8");
-  return { md, cacheado: false, mdPath };
+  return { md, cacheado: false };
+}
+
+// ===== OCR (solo para PDFs escaneados, sin capa de texto) =====
+
+let _ocrWorkerPromise = null;
+async function getOcrWorker() {
+  if (!_ocrWorkerPromise) {
+    _ocrWorkerPromise = createWorker("spa", 1, {
+      cachePath: path.join(__dirname, "..", "data", "ocr"),
+    });
+  }
+  return _ocrWorkerPromise;
+}
+
+/**
+ * OCR página por página sobre el PDF escaneado. Para no procesar pliegos de
+ * cientos de páginas completos, se detiene unas páginas después de encontrar
+ * la tabla de criterios (palabras "puntaje"/"desempate" + criterios extraíbles).
+ * El resultado se cachea en disco como `<id>.ocr.md`.
+ */
+async function ocrAMarkdown(doc, buffer, { maxPaginas = 120 } = {}) {
+  fs.mkdirSync(PLIEGOS_DIR, { recursive: true });
+  const mdPath = path.join(PLIEGOS_DIR, `${doc.id}.ocr.md`);
+  if (fs.existsSync(mdPath)) {
+    return { md: fs.readFileSync(mdPath, "utf8"), cacheado: true };
+  }
+
+  const parser = new PDFParse({ data: new Uint8Array(buffer) });
+  const partes = [];
+  try {
+    const worker = await getOcrWorker();
+    let total = maxPaginas;
+    try {
+      const t = await parser.getText();
+      total = t?.total || maxPaginas;
+    } catch {}
+    const max = Math.min(total, maxPaginas);
+
+    let encontradoEn = -1;
+    for (let p = 1; p <= max; p++) {
+      const shot = await parser.getScreenshot({
+        partial: [p],
+        scale: 2,
+        imageBuffer: true,
+      });
+      const img = shot?.pages?.[0]?.data;
+      if (!img) continue;
+      const { data } = await worker.recognize(Buffer.from(img));
+      partes.push(data?.text || "");
+
+      if (encontradoEn < 0) {
+        const acumulado = partes.join("\n");
+        if (/puntaje|desempate/i.test(acumulado)) {
+          const r = extraerCriterios(textoAMarkdown(acumulado));
+          if (r.criterios.length >= 2) encontradoEn = p;
+        }
+      }
+      // La tabla puede continuar en las páginas siguientes: leer 3 extra.
+      if (encontradoEn > 0 && p >= encontradoEn + 3) break;
+    }
+  } finally {
+    try {
+      await parser.destroy();
+    } catch {}
+  }
+
+  const md = textoAMarkdown(partes.join("\n"), "Pliego (OCR)", partes.length);
+  fs.writeFileSync(mdPath, md, "utf8");
+  return { md, cacheado: false };
+}
+
+/**
+ * Detecta si el PDF es un documento escaneado (páginas que son imágenes).
+ * Casos: sin capa de texto, o con capa de texto OCR de baja calidad incrustada
+ * por el escáner. Se muestrean hasta 5 páginas repartidas: si casi todas
+ * contienen una imagen de tamaño página, es un escaneo.
+ */
+async function esPdfEscaneado(buffer, mdLen) {
+  if (mdLen < 500) return true;
+  const parser = new PDFParse({ data: new Uint8Array(buffer) });
+  try {
+    let total = 0;
+    try {
+      total = (await parser.getInfo())?.total || 0;
+    } catch {}
+    if (!total) return false;
+    const muestras = [
+      ...new Set(
+        [1, 0.25, 0.5, 0.75, 1].map((f, idx) =>
+          idx === 0 ? 1 : Math.max(1, Math.round(total * f)),
+        ),
+      ),
+    ];
+    let conImagenGrande = 0;
+    for (const p of muestras) {
+      const res = await parser
+        .getImage({ partial: [p], imageBuffer: false, imageDataUrl: false })
+        .catch(() => null);
+      const imgs = res?.pages?.[0]?.images || [];
+      if (imgs.some((im) => (im.width || 0) >= 700 && (im.height || 0) >= 900)) {
+        conImagenGrande++;
+      }
+    }
+    return conImagenGrande >= Math.ceil(muestras.length * 0.8);
+  } finally {
+    try {
+      await parser.destroy();
+    } catch {}
+  }
+}
+
+// ===== Tablas vectoriales =====
+
+/**
+ * Extrae los criterios directamente de las tablas dibujadas del PDF
+ * (getTable reconstruye filas/columnas a partir de las líneas vectoriales y
+ * asigna cada texto a su celda). Mucho más fiel que leer el texto plano:
+ * cada puntaje sale de su propia celda, tal cual está en el pliego.
+ * Devuelve null si ninguna tabla con encabezado PUNTAJE suma un total válido.
+ */
+export async function extraerCriteriosDeTabla(buffer) {
+  const parser = new PDFParse({ data: new Uint8Array(buffer) });
+  let tablas = [];
+  try {
+    const res = await parser.getTable();
+    tablas = res?.mergedTables?.length
+      ? res.mergedTables
+      : (res?.pages || []).flatMap((pg) => pg.tables || []);
+  } finally {
+    try {
+      await parser.destroy();
+    } catch {}
+  }
+
+  const candidatos = [];
+  for (const tabla of tablas) {
+    if (!Array.isArray(tabla) || tabla.length < 2) continue;
+    const norm = tabla.map((row) =>
+      (row || []).map((c) => String(c ?? "").replace(/\s+/g, " ").trim()),
+    );
+    // El encabezado del cuadro de criterios menciona PUNTAJE en las primeras filas
+    const headerIdx = norm.findIndex(
+      (row, i) => i < 3 && row.some((c) => /puntaje/i.test(c)),
+    );
+    if (headerIdx === -1) continue;
+
+    const criterios = [];
+    const vistos = new Set();
+    for (const row of norm.slice(headerIdx + 1)) {
+      const celdas = row.filter(Boolean);
+      if (!celdas.length) continue;
+      if (/^total\b/i.test(celdas[0])) continue;
+      const nombre = limpiarNombreCriterio(celdas[0]);
+      let puntaje = NaN;
+      let unidad = "puntos";
+      // El puntaje es la última celda numérica de la fila (columna derecha)
+      for (let j = celdas.length - 1; j >= 1; j--) {
+        const v = parsearNumero(celdas[j]);
+        if (Number.isFinite(v) && v > 0) {
+          puntaje = v;
+          if (celdas[j].includes("%")) unidad = "%";
+          break;
+        }
+      }
+      const letras = (nombre.match(/[A-Za-zÁÉÍÓÚÑáéíóúñ]/g) || []).length;
+      if (!nombre || letras < 3 || nombre.length > 160) continue;
+      if (NOMBRES_EXCLUIDOS.has(nombre.toLowerCase())) continue;
+      if (!Number.isFinite(puntaje) || puntaje <= 0 || puntaje > 1000) continue;
+      const key = nombre.toLowerCase();
+      if (vistos.has(key)) continue;
+      vistos.add(key);
+      criterios.push({
+        nombre,
+        puntaje: Math.round(puntaje * 100) / 100,
+        unidad,
+      });
+    }
+    if (criterios.length >= 2) {
+      const puntajeTotal =
+        Math.round(criterios.reduce((s, c) => s + c.puntaje, 0) * 100) / 100;
+      candidatos.push({ criterios, puntajeTotal });
+    }
+  }
+
+  if (!candidatos.length) return null;
+  // Mismo criterio de validación que el extractor de texto: el cuadro real
+  // suma 100 (±1) o, como último recurso, 1000 (±10).
+  const cerca = (objetivo, tol) =>
+    candidatos.filter((c) => Math.abs(c.puntajeTotal - objetivo) <= tol);
+  const elegibles = cerca(100, 1).length ? cerca(100, 1) : cerca(1000, 10);
+  if (!elegibles.length) return null;
+  return elegibles.reduce((a, b) =>
+    b.criterios.length > a.criterios.length ? b : a,
+  );
 }
 
 // Patrones para "desempate" — búsqueda primaria
@@ -291,6 +513,9 @@ function extraerCriteriosDeBloque(lineas, inicio) {
   const criterios = [];
   const vistos = new Set();
   let lineasSinMatch = 0;
+  // Primera mitad de una fila partida en dos líneas
+  // ("Vinculación de personas con" + "discapacidad 1").
+  let prefijo = "";
 
   for (const raw of bloque) {
     const linea = raw.trim();
@@ -312,7 +537,13 @@ function extraerCriteriosDeBloque(lineas, inicio) {
     for (const { re, withUnit } of patrones) {
       const m = linea.match(re);
       if (!m) continue;
-      const nombre = limpiarNombreCriterio(m[1]);
+      // Si el fragmento empieza en minúscula es la continuación de la línea
+      // anterior: reconstruir el nombre completo de la fila partida.
+      const fragmento = m[1].trim();
+      const nombre =
+        prefijo && /^[a-záéíóúñ]/.test(fragmento)
+          ? limpiarNombreCriterio(`${prefijo} ${fragmento}`)
+          : limpiarNombreCriterio(fragmento);
       const puntaje = parsearNumero(m[2]);
       if (!nombre || nombre.length < 3 || nombre.length > 140) break;
       if (NOMBRES_EXCLUIDOS.has(nombre.toLowerCase())) break;
@@ -343,11 +574,56 @@ function extraerCriteriosDeBloque(lineas, inicio) {
       break;
     }
 
+    // Número solo en su propia línea: cierre de una fila partida en varias
+    // ("Vinculación de / personas con / discapacidad" y luego "1").
+    if (!capturado && prefijo && criterios.length > 0) {
+      const mSolo = linea.match(
+        /^(\d{1,3}(?:[.,]\d{1,3})?)\s*(puntos|pts|%)?\.?\s*$/i,
+      );
+      if (mSolo) {
+        const nombre = limpiarNombreCriterio(prefijo);
+        const puntaje = parsearNumero(mSolo[1]);
+        const letras = (nombre.match(/[A-Za-zÁÉÍÓÚÑáéíóúñ]/g) || []).length;
+        const key = nombre.toLowerCase();
+        if (
+          nombre &&
+          letras >= 3 &&
+          nombre.length <= 140 &&
+          /^[A-Za-zÁÉÍÓÚÑáéíóúñ(]/.test(nombre) &&
+          !NOMBRES_EXCLUIDOS.has(key) &&
+          !vistos.has(key) &&
+          Number.isFinite(puntaje) &&
+          puntaje > 0 &&
+          puntaje <= 100
+        ) {
+          vistos.add(key);
+          criterios.push({
+            nombre,
+            puntaje: Math.round(puntaje * 100) / 100,
+            unidad: (mSolo[2] || "").includes("%") ? "%" : "puntos",
+          });
+          capturado = true;
+        }
+      }
+    }
+
     if (capturado) {
       lineasSinMatch = 0;
-    } else if (criterios.length > 0) {
-      lineasSinMatch++;
-      if (lineasSinMatch >= 4) break;
+      prefijo = "";
+    } else {
+      // Línea con texto pero sin número al final: fragmento de una fila
+      // partida en varias líneas — se acumula hasta encontrar el puntaje.
+      const letras = (linea.match(/[A-Za-zÁÉÍÓÚÑáéíóúñ]/g) || []).length;
+      if (letras >= 3 && !/\d\s*$/.test(linea) && linea.length <= 100) {
+        const combinado = prefijo ? `${prefijo} ${linea}` : linea;
+        prefijo = combinado.length <= 160 ? combinado : linea;
+      } else {
+        prefijo = "";
+      }
+      if (criterios.length > 0) {
+        lineasSinMatch++;
+        if (lineasSinMatch >= 4) break;
+      }
     }
   }
 
@@ -452,6 +728,83 @@ function extraerCuadroPuntaje(lineas, inicio) {
 }
 
 /**
+ * Cuadros "por columnas": algunos PDFs entregan el texto del cuadro columna a
+ * columna — primero el encabezado PUNTAJE con la lista de valores ("599 puntos",
+ * "180 puntos", …) y después el encabezado FACTOR/CRITERIO con la lista de
+ * nombres. Se emparejan por posición; si sobra un valor y coincide con la suma
+ * de los demás, es la fila TOTAL y se descarta.
+ */
+function extraerColumnasFactorPuntaje(lineas) {
+  const candidatos = [];
+  for (let i = 0; i < lineas.length; i++) {
+    if (!/^#{0,6}\s*puntajes?\s*$/i.test(lineas[i].trim())) continue;
+
+    // Columna de valores: líneas consecutivas "N puntos" (tolera OCR "puntOs")
+    const valores = [];
+    let j = i + 1;
+    for (; j < lineas.length && valores.length < 30; j++) {
+      const l = lineas[j].trim();
+      if (!l) continue;
+      const m = l.match(/^(\d{1,4}(?:[.,]\d{1,3})?)\s*punt\w*\.?\s*$/i);
+      if (!m) break;
+      valores.push(parsearNumero(m[1]));
+    }
+    if (valores.length < 3) continue;
+
+    // Encabezado de la columna de nombres en las siguientes líneas
+    let k = j;
+    let okHeader = false;
+    for (let c = 0; k < lineas.length && c < 4; k++) {
+      const l = lineas[k].trim();
+      if (!l) continue;
+      c++;
+      if (/^#{0,6}\s*(factor|criterio|concepto)e?s?\s*$/i.test(l)) {
+        okHeader = true;
+        k++;
+        break;
+      }
+    }
+    if (!okHeader) continue;
+
+    // Columna de nombres hasta TOTAL o nuevo encabezado
+    const nombres = [];
+    for (; k < lineas.length && nombres.length < valores.length + 2; k++) {
+      const l = lineas[k].trim();
+      if (!l) continue;
+      if (/^#{0,6}\s*total\b/i.test(l)) break;
+      if (/^#{1,6}\s/.test(l) && nombres.length) break;
+      const nombre = limpiarNombreCriterio(l.replace(/^#{1,6}\s*/, ""));
+      const letras = (nombre.match(/[A-Za-zÁÉÍÓÚÑáéíóúñ]/g) || []).length;
+      if (letras < 3 || nombre.length > 160) continue;
+      if (NOMBRES_EXCLUIDOS.has(nombre.toLowerCase())) continue;
+      nombres.push(nombre);
+    }
+    if (!nombres.length) continue;
+
+    // Valor extra que iguala la suma de los demás = fila TOTAL
+    let vals = valores;
+    if (valores.length === nombres.length + 1) {
+      const suma = valores.slice(0, -1).reduce((a, b) => a + b, 0);
+      if (Math.abs(suma - valores[valores.length - 1]) <= 1) {
+        vals = valores.slice(0, -1);
+      }
+    }
+    if (vals.length !== nombres.length) continue;
+    if (vals.some((v) => !Number.isFinite(v) || v <= 0 || v > 1000)) continue;
+
+    const criterios = nombres.map((nombre, idx) => ({
+      nombre,
+      puntaje: Math.round(vals[idx] * 100) / 100,
+      unidad: "puntos",
+    }));
+    const puntajeTotal =
+      Math.round(criterios.reduce((s, c) => s + c.puntaje, 0) * 100) / 100;
+    candidatos.push({ criterios, puntajeTotal });
+  }
+  return candidatos;
+}
+
+/**
  * Desempata entre tablas candidatas YA validadas (suman ~100, ver buscarMejorTabla).
  * Prefiere la que tiene más criterios y la que trae los puntajes en la columna del
  * extremo derecho.
@@ -533,6 +886,12 @@ function buscarMejorTabla(lineas) {
     if (resultado) evaluados.push({ resultado, derecho: true });
   }
 
+  // Cuadros entregados columna a columna (PUNTAJE primero, FACTOR después):
+  // el emparejamiento por posición es señal fuerte.
+  for (const resultado of extraerColumnasFactorPuntaje(lineas)) {
+    evaluados.push({ resultado, derecho: true });
+  }
+
   // Filtro principal: la tabla de criterios correcta SIEMPRE suma 100 puntos.
   // Solo aceptamos candidatas cuyo total sea 100 (±1 por redondeo). Como último
   // recurso admitimos la escala de 1000 (±10) que usan algunos pliegos. Si
@@ -576,7 +935,7 @@ export async function analizarPliego(idPortafolio) {
   const pliego = elegirPliego(docs);
 
   if (!pliego) {
-    const hasPdfs = docs.some((d) => (d?.extensi_n || "").toLowerCase() === "pdf");
+    const hasPdfs = docs.some(esPdf);
     return {
       id_portafolio: idPortafolio,
       documento_analizado: null,
@@ -586,7 +945,7 @@ export async function analizarPliego(idPortafolio) {
       puntaje_total: 0,
       advertencias: [
         hasPdfs
-          ? "No se pudo identificar el pliego de condiciones definitivo entre los PDFs disponibles. Ningún documento coincide con las palabras clave esperadas (pliego, definitivo, condiciones)."
+          ? "No se pudo identificar el pliego de condiciones definitivo entre los PDFs disponibles. Ningún documento coincide con las palabras clave esperadas (pliego, definitivo, condiciones, documento base)."
           : "No se encontraron PDFs en esta licitación.",
       ],
       analizado_en: new Date().toISOString(),
@@ -594,17 +953,20 @@ export async function analizarPliego(idPortafolio) {
   }
 
   const advertencias = [];
+  let buffer;
   let md = "";
   let cacheado = false;
+  let metodo = "pdf-parse → markdown";
   try {
-    const r = await obtenerMarkdownPliego(pliego);
+    ({ buffer } = await obtenerPdfPliego(pliego));
+    const r = await obtenerMarkdownPliego(pliego, buffer);
     md = r.md;
     cacheado = r.cacheado;
   } catch (e) {
     return {
       id_portafolio: idPortafolio,
       documento_analizado: pliego,
-      metodo_extraccion: "pdf-parse → markdown",
+      metodo_extraccion: metodo,
       markdown_cacheado: false,
       criterios: [],
       puntaje_total: 0,
@@ -613,23 +975,70 @@ export async function analizarPliego(idPortafolio) {
     };
   }
 
-  if (md.trim().length < 500) {
-    advertencias.push(
-      "El PDF parece escaneado o sin capa de texto. No es posible analizarlo automáticamente.",
-    );
-  }
+  let criterios = [];
+  let puntajeTotal = 0;
+  const esEscaneado = await esPdfEscaneado(buffer, md.trim().length).catch(
+    () => md.trim().length < 500,
+  );
 
-  const { criterios, puntajeTotal } = extraerCriterios(md);
-  if (criterios.length === 0 && md.trim().length >= 500) {
-    advertencias.push(
-      "No se identificó sección de criterios de evaluación en el pliego.",
-    );
+  if (!esEscaneado) {
+    // 1) Tablas vectoriales del PDF: los puntajes salen celda por celda,
+    //    tal cual están en el cuadro del pliego.
+    const deTabla = await extraerCriteriosDeTabla(buffer).catch((e) => {
+      console.warn(`[pliego] getTable falló para ${pliego.id}: ${e.message}`);
+      return null;
+    });
+    if (deTabla) {
+      ({ criterios, puntajeTotal } = deTabla);
+      metodo = "tabla del PDF (celdas vectoriales)";
+    } else {
+      // 2) Fallback: heurística sobre el texto plano
+      ({ criterios, puntajeTotal } = extraerCriterios(md));
+    }
+    if (criterios.length === 0) {
+      advertencias.push(
+        "No se identificó sección de criterios de evaluación en el pliego.",
+      );
+    }
+  } else {
+    // PDF escaneado (las páginas son imágenes). Si el escáner incrustó una
+    // capa de texto, intentar primero con ella (suele ser mejor que re-OCRear).
+    const delTexto =
+      md.trim().length >= 500
+        ? extraerCriterios(md)
+        : { criterios: [], puntajeTotal: 0 };
+    if (delTexto.criterios.length > 0) {
+      ({ criterios, puntajeTotal } = delTexto);
+      metodo = "texto incrustado del escaneo";
+      advertencias.push(
+        "El PDF es un documento escaneado: se usó la capa de texto incrustada por el escáner.",
+      );
+    } else {
+      // Sin texto utilizable: SOLO aquí se usa OCR.
+      advertencias.push(
+        "El PDF es un documento escaneado (imagen): se aplicó OCR para leer la tabla de criterios.",
+      );
+      metodo = "ocr (tesseract.js) → markdown";
+      try {
+        const r = await ocrAMarkdown(pliego, buffer);
+        md = r.md;
+        cacheado = r.cacheado;
+        ({ criterios, puntajeTotal } = extraerCriterios(md));
+        if (criterios.length === 0) {
+          advertencias.push(
+            "El OCR no encontró una tabla de criterios reconocible.",
+          );
+        }
+      } catch (e) {
+        advertencias.push(`Error durante el OCR: ${e.message}`);
+      }
+    }
   }
 
   return {
     id_portafolio: idPortafolio,
     documento_analizado: pliego,
-    metodo_extraccion: "pdf-parse → markdown",
+    metodo_extraccion: metodo,
     markdown_cacheado: cacheado,
     criterios,
     puntaje_total: puntajeTotal,
